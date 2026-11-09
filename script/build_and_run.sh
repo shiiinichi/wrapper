@@ -24,11 +24,14 @@ xcrun clang++ -arch arm64 -std=c++17 -O1 -g -Wall -Wextra -Werror \
   "$ROOT_DIR/native/macos/main.cpp" \
   "$ROOT_DIR/native/macos/elf_loader.cpp" \
   "$ROOT_DIR/native/macos/shims.cpp" \
+  "$ROOT_DIR/native/macos/jni_host.cpp" \
+  "$ROOT_DIR/native/macos/abi_runtime.cpp" \
+  "$ROOT_DIR/native/macos/abi_selftest.cpp" \
   -o "$APP_BINARY"
 
 case "$MODE" in
   --debug|debug)
-    exec xcrun lldb -- "$APP_BINARY" --assets "$BUILD_DIR/assets" --probe blocks
+    exec xcrun lldb -- "$APP_BINARY" --assets "$BUILD_DIR/assets" --apple-profile --initialize libandroidappmusic.so
     ;;
   --verify|verify)
     python3 "$ROOT_DIR/native/macos/test_loader.py" --binary "$APP_BINARY" --assets "$BUILD_DIR/assets"

@@ -8,6 +8,7 @@ import struct
 import subprocess
 import tempfile
 import unittest
+from test_fixtures import tls_fixture
 
 
 class ElfFixture:
@@ -54,9 +55,89 @@ class NativeLoaderTests(unittest.TestCase):
     binary: Path
     assets: Path
 
-    def call(self, mode: str, name: str, assets=None):
-        return subprocess.run([str(self.binary), "--assets", str(assets or self.assets), mode, name],
+    def call(self, mode: str, name: str, assets=None, apple_profile=False):
+        command = [str(self.binary), "--assets", str(assets or self.assets), mode, name]
+        if apple_profile:
+            command.append("--apple-profile")
+        return subprocess.run(command,
                               capture_output=True, text=True, timeout=10)
+
+    def test_real_apple_jni_entry_points_return_jni_16(self):
+        for name in ["coreadi-jni", "lskd-jni"]:
+            with self.subTest(library=name):
+                process = self.call("--probe", name, apple_profile=True)
+                result = self.result(process)
+                self.assertEqual(process.returncode, 0, result)
+                self.assertEqual(result["result"]["jni_version"], 0x10006)
+                self.assertEqual(result["result"]["get_env_calls"], 0)
+                self.assertTrue(result["loader"]["mixed_pages_readonly"])
+
+    def test_real_storeservices_constructor_chain_completes(self):
+        process = self.call("--initialize", "libstoreservicescore.so", apple_profile=True)
+        result = self.result(process)
+        self.assertEqual(process.returncode, 0, result)
+        images = {image["library"]: image for image in result["loader"]["images"]}
+        self.assertEqual(images["libstoreservicescore.so"]["constructors_called"], 64)
+        self.assertEqual(images["libmediaplatform.so"]["constructors_called"], 7)
+        self.assertGreater(images["libc++_shared.so"]["tls_read_rewrites"], 0)
+        self.assertGreater(result["loader"]["guest_destructors_registered"], 60)
+        self.assertIn("libCoreFoundation.so", result["loader"]["native_host_libraries"])
+
+    def test_real_music_constructor_chain_completes_without_audio(self):
+        process = self.call("--initialize", "libandroidappmusic.so", apple_profile=True)
+        result = self.result(process)
+        self.assertEqual(process.returncode, 0, result)
+        images = {image["library"]: image for image in result["loader"]["images"]}
+        self.assertEqual(images["libandroidappmusic.so"]["constructors_called"], 91)
+        self.assertEqual(images["libmedialibrarycore.so"]["constructors_called"], 209)
+        self.assertEqual(sum(image["constructors_called"] for image in images.values()), 373)
+        self.assertTrue(result["loader"]["constructors_initialized"])
+        self.assertTrue(images["libOpenSLES.so"]["data_only"])
+        self.assertTrue(images["libwilhelm.so"]["data_only"])
+        self.assertEqual(images["libOpenSLES.so"]["constructors_called"], 0)
+        self.assertFalse(any(image["missing_symbols"] for image in images.values()))
+        guarded = {name for image in images.values() for name in image["guarded_symbols"]}
+        self.assertIn("CFStringCreateWithFormat", guarded)
+        self.assertIn("curl_easy_setopt", guarded)
+
+    def test_tls_adaptation_preserves_machine_state_and_thread_isolation(self):
+        with tempfile.TemporaryDirectory(prefix="elf-tls-abi-") as temp:
+            tls_fixture(Path(temp))
+            process = self.call("--probe", "tls-abi", Path(temp), apple_profile=True)
+        result = self.result(process)
+        self.assertEqual(process.returncode, 0, result)
+        self.assertEqual(result["result"], {"state_preserved": True, "independent_threads": 3})
+        self.assertEqual(result["loader"]["images"][0]["tls_read_rewrites"], 1)
+
+    def test_guest_pthread_and_futex_synchronize_real_threads(self):
+        with tempfile.TemporaryDirectory(prefix="elf-runtime-abi-") as temp:
+            (Path(temp) / "abi-read.txt").write_bytes(b"typed-android-file-bridge\n")
+            process = self.call("--probe", "runtime-abi", Path(temp), apple_profile=True)
+        result = self.result(process)
+        self.assertEqual(process.returncode, 0, result)
+        self.assertTrue(all(result["result"].values()))
+
+    def test_dynamic_function_guards_stop_unimplemented_calls(self):
+        fixture = ElfFixture(self.assets / "libBlocksRuntime.so")
+        fixture.rename("malloc", "nohost")
+        with tempfile.TemporaryDirectory(prefix="elf-import-guard-") as temp:
+            (Path(temp) / "libBlocksRuntime.so").write_bytes(fixture.data)
+            process = self.call("--probe", "blocks", Path(temp), apple_profile=True)
+        self.assertEqual(process.returncode, 86)
+        self.assertIn("unimplemented Android function: nohost", process.stderr)
+
+    def test_incompatible_long_double_api_is_not_forwarded_to_darwin(self):
+        # Android ARM64 long double is binary128; Darwin ARM64 uses binary64.
+        # Redirect the allocator to this API to prove that calling it stops.
+        fixture = ElfFixture(self.assets / "libBlocksRuntime.so")
+        source, target = fixture.symbol("__assert2"), fixture.symbol("malloc")
+        fixture.rename("__assert2", "strtold")
+        fixture.data[target:target + 4] = fixture.data[source:source + 4]
+        with tempfile.TemporaryDirectory(prefix="elf-long-double-") as temp:
+            (Path(temp) / "libBlocksRuntime.so").write_bytes(fixture.data)
+            process = self.call("--probe", "blocks", Path(temp), apple_profile=True)
+        self.assertEqual(process.returncode, 86)
+        self.assertIn("unimplemented Android function: strtold", process.stderr)
 
     def result(self, process):
         self.assertTrue(process.stdout, process.stderr)

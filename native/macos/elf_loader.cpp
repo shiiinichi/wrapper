@@ -1,10 +1,13 @@
 #include "elf_loader.h"
 #include "shims.h"
+#include "abi_runtime.h"
+#include <dlfcn.h>
 
 #include <algorithm>
 #include <cerrno>
 #include <cstring>
 #include <fstream>
+#include <cstdio>
 #include <iomanip>
 #include <limits>
 #include <sstream>
@@ -25,6 +28,7 @@ struct Header {
 };
 struct Dynamic { int64_t tag; uint64_t value; };
 struct Rela { uint64_t offset, info; int64_t addend; };
+struct Section { uint32_t name, type; uint64_t flags, address, offset, size; uint32_t link, info; uint64_t alignment, entry_size; };
 static_assert(sizeof(Header) == 64 && sizeof(ProgramHeader) == 56);
 static_assert(sizeof(Symbol) == 24 && sizeof(Rela) == 24 && sizeof(Dynamic) == 16);
 
@@ -83,7 +87,7 @@ template <typename Range> void stringArray(std::ostream& out, const Range& value
 
 } // namespace
 
-Image::Image(const std::filesystem::path& path) {
+Image::Image(const std::filesystem::path& path, bool reserve_tls_adapters) {
     report.library = path.filename().string();
     try {
         std::ifstream stream(path, std::ios::binary | std::ios::ate);
@@ -142,12 +146,30 @@ Image::Image(const std::filesystem::path& path) {
         }
         lowest_vaddr_ = low;
         mapped_size_ = static_cast<size_t>(high - low);
-        void* memory = mmap(nullptr, mapped_size_, PROT_READ | PROT_WRITE,
+        size_t adapter_bytes = 0;
+        if (reserve_tls_adapters) {
+            if (!header.shnum || header.shentsize != sizeof(Section) ||
+                add(header.shoff, uint64_t(header.shnum) * sizeof(Section)) > file_.size())
+                throw std::runtime_error("TLS adaptation requires valid ELF sections");
+            size_t count = 0;
+            for (size_t i = 0; i < header.shnum; ++i) {
+                auto s = read<Section>(file_.data() + header.shoff + i * sizeof(Section));
+                if (s.type != 1 || !(s.flags & 4)) continue;
+                if (s.size % 4 || add(s.offset, s.size) > file_.size()) throw std::runtime_error("invalid code-section file range");
+                for (size_t n = 0; n < s.size; n += 4)
+                    if ((read<uint32_t>(file_.data() + s.offset + n) & 0xffffffe0U) == 0xd53bd040U) ++count;
+            }
+            if (count > 20000) throw std::runtime_error("TLS adapter count exceeds limit");
+            adapter_bytes = alignUp(count * 384, page_size_);
+        }
+        allocation_size_ = mapped_size_ + adapter_bytes;
+        void* memory = mmap(nullptr, allocation_size_, PROT_READ | PROT_WRITE,
                             MAP_PRIVATE | MAP_ANON, -1, 0);
         if (memory == MAP_FAILED) throw std::runtime_error("mmap failed: " + std::string(std::strerror(errno)));
         mapping_ = static_cast<uint8_t*>(memory);
         bias_ = reinterpret_cast<uintptr_t>(mapping_) - low;
         report.mapped_bytes = mapped_size_;
+        report.reserved_bytes = allocation_size_;
         page_permissions_.resize(mapped_size_ / page_size_, PROT_NONE);
         for (const auto& ph : segments_) {
             if (ph.type != kLoad || !ph.memsz) continue;
@@ -173,14 +195,14 @@ Image::Image(const std::filesystem::path& path) {
             report.needed.push_back(name);
         }
     } catch (...) {
-        if (mapping_) munmap(mapping_, mapped_size_);
+        if (mapping_) munmap(mapping_, allocation_size_);
         mapping_ = nullptr;
         throw;
     }
 }
 
 Image::~Image() {
-    if (mapping_) munmap(mapping_, mapped_size_);
+    if (mapping_) munmap(mapping_, allocation_size_);
 }
 
 const uint8_t* Image::at(uint64_t vaddr, size_t count) const {
@@ -278,6 +300,7 @@ void* Image::exported(const std::string& name) const {
 }
 
 bool Image::executableAddress(uintptr_t address) const {
+    if (report.data_only) return false;
     if (address < bias_) return false;
     uint64_t vaddr = address - bias_;
     for (const auto& ph : segments_)
@@ -286,9 +309,93 @@ bool Image::executableAddress(uintptr_t address) const {
     return false;
 }
 
-void Image::protect() {
-    if (report.mixed_write_execute_pages)
+void Image::adaptThreadPointerReads() {
+    const auto header = read<Header>(file_.data());
+    if (!header.shnum || header.shentsize != sizeof(Section) ||
+        add(header.shoff, uint64_t(header.shnum) * sizeof(Section)) > file_.size())
+        throw std::runtime_error("instruction adaptation requires valid ELF section metadata");
+    auto branch = [](uintptr_t from, uintptr_t to) {
+        int64_t distance = static_cast<int64_t>(to) - static_cast<int64_t>(from);
+        if (distance % 4 || distance < -(1LL << 27) || distance >= (1LL << 27))
+            throw std::runtime_error("TLS adapter is out of native ARM64 branch range");
+        return uint32_t(0x14000000U | ((distance / 4) & 0x03ffffff));
+    };
+    for (size_t section_index = 0; section_index < header.shnum; ++section_index) {
+        const auto section = read<Section>(file_.data() + header.shoff + section_index * sizeof(Section));
+        if (section.type != 1 || !(section.flags & 4)) continue;
+        if (section.address % 4 || section.size % 4 || !executableAddress(bias_ + section.address))
+            throw std::runtime_error("invalid executable section for TLS adaptation");
+        at(section.address, section.size);
+        for (uint64_t offset = 0; offset < section.size; offset += 4) {
+            auto* location = const_cast<uint8_t*>(at(section.address + offset, 4));
+            uint32_t instruction = read<uint32_t>(location);
+            if ((instruction & 0xffffffe0U) != 0xd53bd040U) continue; // MRS Xn, TPIDR_EL0
+            unsigned destination = instruction & 31;
+            if (destination == 31) { uint32_t nop = 0xd503201f; std::memcpy(location, &nop, 4); continue; }
+            std::vector<uint32_t> code;
+            code.push_back(0xd10003ffU | (800U << 10)); // sub sp, sp, #800
+            for (unsigned r = 0; r < 30; r += 2)
+                code.push_back(0xa9000000U | ((r & 0x7f) << 15) | ((r + 1) << 10) | (31 << 5) | r);
+            code.push_back(0xf9000000U | (30U << 10) | (31 << 5) | 30); // str x30,[sp,#240]
+            code.push_back(0xd53b4210U); // mrs x16,NZCV
+            code.push_back(0xf9000000U | (31U << 10) | (31 << 5) | 16);
+            code.push_back(0xd53b4410U); // mrs x16,FPCR
+            code.push_back(0xf9000000U | (96U << 10) | (31 << 5) | 16);
+            code.push_back(0xd53b4430U); // mrs x16,FPSR
+            code.push_back(0xf9000000U | (97U << 10) | (31 << 5) | 16);
+            for (unsigned r = 0; r < 32; r += 2)
+                code.push_back(0xad000000U | (((256 + r * 16) / 16) << 15) | ((r + 1) << 10) | (31 << 5) | r);
+            size_t load_index = code.size(); code.push_back(0); // ldr x16, getter literal
+            code.push_back(0xd63f0200U); // blr x16
+            code.push_back(0xf9000000U | (destination << 10) | (31 << 5)); // result into saved Xn
+            for (unsigned r = 0; r < 32; r += 2)
+                code.push_back(0xad400000U | (((256 + r * 16) / 16) << 15) | ((r + 1) << 10) | (31 << 5) | r);
+            code.push_back(0xf9400000U | (96U << 10) | (31 << 5) | 16);
+            code.push_back(0xd51b4410U); // msr FPCR,x16
+            code.push_back(0xf9400000U | (97U << 10) | (31 << 5) | 16);
+            code.push_back(0xd51b4430U); // msr FPSR,x16
+            code.push_back(0xf9400000U | (31U << 10) | (31 << 5) | 16);
+            code.push_back(0xd51b4210U); // msr NZCV,x16
+            for (unsigned r = 0; r < 30; r += 2)
+                code.push_back(0xa9400000U | ((r & 0x7f) << 15) | ((r + 1) << 10) | (31 << 5) | r);
+            code.push_back(0xf9400000U | (30U << 10) | (31 << 5) | 30);
+            code.push_back(0x910003ffU | (800U << 10));
+            size_t return_index = code.size(); code.push_back(0);
+            if (code.size() % 2) code.push_back(0xd503201fU);
+            size_t literal_index = code.size(); code.push_back(0); code.push_back(0);
+            size_t bytes = code.size() * 4;
+            if (mapped_size_ + thunk_used_ + bytes > allocation_size_) throw std::runtime_error("TLS adapter arena exhausted");
+            auto* target = mapping_ + mapped_size_ + thunk_used_;
+            code[load_index] = 0x58000010U | (uint32_t(literal_index - load_index) << 5);
+            code[return_index] = branch(reinterpret_cast<uintptr_t>(target + return_index * 4), reinterpret_cast<uintptr_t>(location + 4));
+            uintptr_t getter = reinterpret_cast<uintptr_t>(&guestThreadPointer);
+            std::memcpy(code.data() + literal_index, &getter, 8);
+            std::memcpy(target, code.data(), bytes);
+            uint32_t replacement = branch(reinterpret_cast<uintptr_t>(location), reinterpret_cast<uintptr_t>(target));
+            std::memcpy(location, &replacement, 4);
+            thunk_used_ += bytes; ++report.tls_read_rewrites;
+        }
+    }
+    if (thunk_used_) {
+        report.tls_adapter_bytes = thunk_used_;
+        auto* start = mapping_ + mapped_size_;
+        if (mprotect(start, alignUp(thunk_used_, page_size_), PROT_READ | PROT_EXEC)) throw std::runtime_error("TLS adapter protection failed");
+        __builtin___clear_cache(reinterpret_cast<char*>(start), reinterpret_cast<char*>(start + thunk_used_));
+    }
+}
+
+void Image::protect(bool mixed_pages_readonly) {
+    if (report.data_only) for (auto& permissions : page_permissions_) permissions &= ~PROT_EXEC;
+    if (report.mixed_write_execute_pages && !mixed_pages_readonly)
         throw std::runtime_error(report.library + ": 4 KiB ELF segments share a writable/executable host page");
+    if (mixed_pages_readonly) {
+        for (auto& permissions : page_permissions_) {
+            if ((permissions & (PROT_WRITE | PROT_EXEC)) == (PROT_WRITE | PROT_EXEC)) {
+                permissions &= ~PROT_WRITE;
+                ++report.mixed_pages_read_execute;
+            }
+        }
+    }
     for (size_t first = 0; first < page_permissions_.size();) {
         size_t end = first + 1;
         while (end < page_permissions_.size() && page_permissions_[end] == page_permissions_[first]) ++end;
@@ -306,7 +413,13 @@ void Image::protect() {
     }
 }
 
-Loader::Loader(std::filesystem::path assets) : assets_(std::move(assets)) {}
+Loader::Loader(std::filesystem::path assets, bool apple_profile) : assets_(std::move(assets)), apple_profile_(apple_profile) {}
+
+std::set<std::string> Loader::nativeHostModules() const {
+    std::set<std::string> names;
+    for (const auto& entry : host_modules_) names.insert(entry.first);
+    return names;
+}
 
 Image& Loader::load(const std::string& name) {
     if (relocated_) throw std::runtime_error("loading after relocation is unsupported");
@@ -314,18 +427,42 @@ Image& Loader::load(const std::string& name) {
     auto existing = by_name_.find(name);
     if (existing != by_name_.end()) return *existing->second;
     if (kShimLibraries.count(name)) throw std::runtime_error("cannot use a system shim as the root ELF");
-    auto image = std::make_unique<Image>(assets_ / name);
+    auto image = std::make_unique<Image>(assets_ / name, apple_profile_);
     auto* result = image.get();
-    if (add(total_mapped_, image->report.mapped_bytes) > kMaximumTotal)
+    if (add(total_mapped_, image->report.reserved_bytes) > kMaximumTotal)
         throw std::runtime_error("dependency graph exceeds the 512 MiB mapping limit");
-    total_mapped_ += image->report.mapped_bytes;
+    total_mapped_ += image->report.reserved_bytes;
     by_name_[name] = result;
     images_.push_back(std::move(image));
+    if (apple_profile_ && (name == "libOpenSLES.so" || name == "libwilhelm.so")) {
+        result->report.data_only = true;
+        if (name == "libOpenSLES.so") load("libwilhelm.so");
+        return *result;
+    }
     if (result->has_tls_) issues_.push_back({name, "tls", "PT_TLS requires an Android TLS implementation"});
     if (result->report.mixed_write_execute_pages)
         issues_.push_back({name, "page_permissions", "code and writable data share " +
             std::to_string(result->report.mixed_write_execute_pages) + " host page(s)"});
     for (const auto& dependency : result->report.needed) {
+        if (apple_profile_) {
+            static const std::map<std::string, std::string> native_modules = {
+                {"libCoreFoundation.so", "/System/Library/Frameworks/CoreFoundation.framework/CoreFoundation"},
+                {"libdispatch.so", "/usr/lib/system/libdispatch.dylib"},
+                {"libBlocksRuntime.so", "/usr/lib/system/libsystem_blocks.dylib"},
+                {"libcurl.so", "/usr/lib/libcurl.4.dylib"},
+                {"libandroid.so", ""}
+            };
+            auto native = native_modules.find(dependency);
+            if (native != native_modules.end()) {
+                if (native->second.empty()) { system_shims_.insert(dependency); continue; }
+                if (!host_modules_.count(dependency)) {
+                    void* module = dlopen(native->second.c_str(), RTLD_LOCAL | RTLD_LAZY);
+                    if (!module) throw std::runtime_error("native host module failed: " + dependency);
+                    host_modules_[dependency] = module;
+                }
+                system_shims_.insert(dependency); continue;
+            }
+        }
         if (kShimLibraries.count(dependency)) { system_shims_.insert(dependency); continue; }
         try { load(dependency); }
         catch (const std::exception& error) { issues_.push_back({name, "dependency", dependency + ": " + error.what()}); }
@@ -341,14 +478,39 @@ uintptr_t Loader::resolve(Image& image, const Symbol& symbol, const std::string&
         return 0;
     }
     if (symbol.section) return symbol.section == 0xfff1 ? symbol.value : image.bias_ + symbol.value;
-    for (const auto& candidate : images_)
+    for (const auto& candidate : images_) {
+        if (candidate->report.data_only && (type != 1 || name.rfind("SL_IID_", 0) != 0)) continue;
         if (void* address = candidate->exported(name)) return reinterpret_cast<uintptr_t>(address);
+    }
+    if (apple_profile_) {
+        auto native = runtimeBridge(name);
+        if (native.address && (type != 1 || native.data)) return reinterpret_cast<uintptr_t>(native.address);
+        for (const auto& module : host_modules_) {
+            bool owned = module.first == "libCoreFoundation.so" ?
+                (name.rfind("CF", 0) == 0 || name.rfind("_CF", 0) == 0 || name.rfind("__CF", 0) == 0 || name.rfind("kCF", 0) == 0) :
+                module.first == "libdispatch.so" ? (name.rfind("dispatch_", 0) == 0 || name.rfind("_dispatch_", 0) == 0) :
+                module.first == "libBlocksRuntime.so" ? (name.rfind("_Block_", 0) == 0 || name.rfind("_NSConcrete", 0) == 0) :
+                module.first == "libcurl.so" ? name.rfind("curl_", 0) == 0 : false;
+            // These interfaces take Darwin varargs/va_list; Android callers
+            // need a separate adapter even though dyld exports the same name.
+            if (name == "CFLog" || name.find("WithFormat") != std::string::npos ||
+                name.find("AppendFormat") != std::string::npos || name == "dispatch_debug" ||
+                name == "curl_easy_setopt" || name == "curl_easy_getinfo" || name == "curl_share_setopt" ||
+                name == "curl_multi_setopt" || name == "curl_formadd" || name.rfind("curl_mprintf", 0) == 0)
+                owned = false;
+            if (owned) if (void* address = dlsym(module.second, name.c_str())) return reinterpret_cast<uintptr_t>(address);
+        }
+    }
     auto bridge = bridgeSymbol(name);
     if (bridge.address && (type != 1 || bridge.data)) {
         if (bridge.guarded) image.report.guarded_symbols.insert(name);
         return reinterpret_cast<uintptr_t>(bridge.address);
     }
     if ((symbol.info >> 4) == 2) { ++image.report.weak_unresolved; return 0; }
+    if (apple_profile_ && type == 2) {
+        image.report.guarded_symbols.insert(name);
+        return reinterpret_cast<uintptr_t>(guardedImport(name));
+    }
     image.report.missing_symbols.insert(name);
     return 0;
 }
@@ -361,6 +523,11 @@ void Loader::relocateTable(Image& image, uint64_t address, uint64_t size) {
         auto relocation = read<Rela>(image.at(add(address, offset), sizeof(Rela)));
         uint32_t type = uint32_t(relocation.info), index = uint32_t(relocation.info >> 32);
         if (type == 0) continue;
+        if (image.report.data_only && type != 1027) {
+            if (index >= image.symbols_.size()) throw std::runtime_error("data constant symbol index out of bounds");
+            auto name = image.stringAt(image.symbols_[index].name);
+            if (name.rfind("SL_IID_", 0) != 0) { ++image.report.data_only_relocations_skipped; continue; }
+        }
         if (type != 257 && type != 1025 && type != 1026 && type != 1027) {
             issues_.push_back({image.report.library, "relocation", "unsupported AArch64 relocation " + std::to_string(type)});
             continue;
@@ -415,14 +582,26 @@ bool Loader::complete() const {
     return true;
 }
 
-void Loader::prepareExecution() {
-    if (!complete()) throw std::runtime_error("dependency, relocation, or page-layout blockers prevent execution");
-    for (auto& image : images_) image->protect();
+void Loader::prepareExecution(bool mixed_pages_readonly) {
+    if (executable_) throw std::runtime_error("execution has already been prepared");
+    if (!relocated_) throw std::runtime_error("relocations have not been applied");
+    for (const auto& issue : issues_)
+        if (!mixed_pages_readonly || issue.kind != "page_permissions")
+            throw std::runtime_error("dependency, relocation, or page-layout blockers prevent execution");
+    for (const auto& image : images_)
+        if (!image->report.missing_symbols.empty()) throw std::runtime_error("unresolved imports prevent execution");
+    for (auto& image : images_) {
+        if (apple_profile_ && !image->report.data_only) image->adaptThreadPointerReads();
+        image->protect(mixed_pages_readonly);
+    }
+    if (apple_profile_) finishImportGuards();
+    mixed_pages_readonly_ = mixed_pages_readonly;
     executable_ = true;
 }
 
 void Loader::initializeImage(Image& image, std::set<Image*>& visited) {
     if (!visited.insert(&image).second) return;
+    if (image.report.data_only) return;
     for (const auto& name : image.report.needed) {
         auto found = by_name_.find(name);
         if (found != by_name_.end()) initializeImage(*found->second, visited);
@@ -430,6 +609,8 @@ void Loader::initializeImage(Image& image, std::set<Image*>& visited) {
     auto invoke = [&](uintptr_t address) {
         if (!address || address == std::numeric_limits<uintptr_t>::max()) return;
         if (!image.executableAddress(address)) throw std::runtime_error("constructor is outside its executable PT_LOAD");
+        if (apple_profile_) std::fprintf(stderr, "native-poc: constructor %s+0x%llx\n", image.report.library.c_str(),
+            static_cast<unsigned long long>(address - image.bias_));
         char process_name[] = "wrapper-native-poc";
         char* argv[] = {process_name, nullptr};
         char* envp[] = {nullptr};
@@ -485,6 +666,12 @@ std::string loaderReport(const Loader& loader) {
         << ",\"execution_prepared\":" << (loader.executionPrepared() ? "true" : "false")
         << ",\"constructors_initialized\":" << (loader.initialized() ? "true" : "false")
         << ",\"guarded_imports_are_traps\":true"
+        << ",\"mixed_pages_readonly\":" << (loader.mixedPagesReadonly() ? "true" : "false")
+        << ",\"apple_host_profile\":" << (loader.appleProfile() ? "true" : "false")
+        << ",\"guest_destructors_registered\":" << guestDestructorCount()
+        << ",\"native_host_libraries\":";
+    stringArray(out, loader.nativeHostModules());
+    out
         << ",\"system_shim_libraries\":";
     stringArray(out, loader.systemShims());
     out << ",\"issues\":[";
@@ -501,8 +688,14 @@ std::string loaderReport(const Loader& loader) {
         const auto& r = image->report;
         if (!first) out << ',';
         out << "{\"library\":" << jsonString(r.library) << ",\"mapped_bytes\":" << r.mapped_bytes
+            << ",\"reserved_bytes\":" << r.reserved_bytes
+            << ",\"data_only\":" << (r.data_only ? "true" : "false")
             << ",\"relocations_applied\":" << r.relocations_applied << ",\"weak_unresolved\":" << r.weak_unresolved
             << ",\"mixed_write_execute_pages\":" << r.mixed_write_execute_pages
+            << ",\"mixed_pages_read_execute\":" << r.mixed_pages_read_execute
+            << ",\"tls_read_rewrites\":" << r.tls_read_rewrites
+            << ",\"tls_adapter_bytes\":" << r.tls_adapter_bytes
+            << ",\"data_only_relocations_skipped\":" << r.data_only_relocations_skipped
             << ",\"constructors_called\":" << r.constructors_called << ",\"needed\":";
         stringArray(out, r.needed);
         out << ",\"guarded_symbols\":";

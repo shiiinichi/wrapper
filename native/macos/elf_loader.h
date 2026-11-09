@@ -32,10 +32,16 @@ struct Issue {
 struct ImageReport {
     std::string library;
     size_t mapped_bytes = 0;
+    size_t reserved_bytes = 0;
     size_t relocations_applied = 0;
     size_t weak_unresolved = 0;
     size_t mixed_write_execute_pages = 0;
     size_t constructors_called = 0;
+    size_t mixed_pages_read_execute = 0;
+    size_t tls_read_rewrites = 0;
+    size_t tls_adapter_bytes = 0;
+    size_t data_only_relocations_skipped = 0;
+    bool data_only = false;
     std::vector<std::string> needed;
     std::set<std::string> guarded_symbols;
     std::set<std::string> missing_symbols;
@@ -43,7 +49,7 @@ struct ImageReport {
 
 class Image {
 public:
-    explicit Image(const std::filesystem::path& path);
+    explicit Image(const std::filesystem::path& path, bool reserve_tls_adapters = false);
     ~Image();
     Image(const Image&) = delete;
     Image& operator=(const Image&) = delete;
@@ -51,6 +57,9 @@ public:
     ImageReport report;
     void* exported(const std::string& name) const;
     bool executableAddress(uintptr_t address) const;
+    uintptr_t mappingBegin() const { return reinterpret_cast<uintptr_t>(mapping_); }
+    uintptr_t mappingEnd() const { return mappingBegin() + mapped_size_; }
+    uintptr_t loadBias() const { return bias_; }
 
 private:
     friend class Loader;
@@ -62,6 +71,8 @@ private:
     std::vector<int> page_permissions_;
     uint8_t* mapping_ = nullptr;
     size_t mapped_size_ = 0;
+    size_t allocation_size_ = 0;
+    size_t thunk_used_ = 0;
     size_t page_size_ = 0;
     uint64_t lowest_vaddr_ = 0;
     uintptr_t bias_ = 0;
@@ -72,15 +83,16 @@ private:
     uint64_t tag(int64_t key, uint64_t fallback = 0) const;
     void readDynamic(const ProgramHeader& segment);
     void readSymbols();
-    void protect();
+    void protect(bool mixed_pages_readonly);
+    void adaptThreadPointerReads();
 };
 
 class Loader {
 public:
-    explicit Loader(std::filesystem::path assets);
+    explicit Loader(std::filesystem::path assets, bool apple_profile = false);
     Image& load(const std::string& name);
     void relocate();
-    void prepareExecution();
+    void prepareExecution(bool mixed_pages_readonly = false);
     void initialize();
     void* symbol(const std::string& library, const std::string& name) const;
     const std::vector<std::unique_ptr<Image>>& images() const { return images_; }
@@ -89,6 +101,9 @@ public:
     bool complete() const;
     bool executionPrepared() const { return executable_; }
     bool initialized() const { return initialized_; }
+    bool mixedPagesReadonly() const { return mixed_pages_readonly_; }
+    bool appleProfile() const { return apple_profile_; }
+    std::set<std::string> nativeHostModules() const;
 
 private:
     std::filesystem::path assets_;
@@ -100,6 +115,9 @@ private:
     bool relocated_ = false;
     bool executable_ = false;
     bool initialized_ = false;
+    bool mixed_pages_readonly_ = false;
+    bool apple_profile_ = false;
+    std::map<std::string, void*> host_modules_;
 
     uintptr_t resolve(Image& image, const Symbol& symbol, const std::string& name);
     void relocateTable(Image& image, uint64_t address, uint64_t size);

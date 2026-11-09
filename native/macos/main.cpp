@@ -1,4 +1,6 @@
 #include "elf_loader.h"
+#include "jni_host.h"
+#include "abi_selftest.h"
 
 #if !defined(__APPLE__) || !defined(__aarch64__)
 #error "This proof of concept must be compiled as a native arm64 macOS executable."
@@ -117,6 +119,7 @@ int main(int argc, char** argv) {
     setrlimit(RLIMIT_CORE, &core);
     std::unique_ptr<Loader> loader;
     std::string assets, mode, library;
+    bool apple_profile = false;
     try {
         for (int i = 1; i < argc; ++i) {
             std::string arg = argv[i];
@@ -127,22 +130,28 @@ int main(int argc, char** argv) {
                     mode = arg;
                     library = argv[++i];
                 }
+            } else if (arg == "--apple-profile") {
+                apple_profile = true;
             } else if (arg == "--help") {
-                std::cout << "usage: wrapper-native-poc --assets DIR [--probe zlib|blocks | --inspect LIB.so | --initialize LIB.so]\n";
+                std::cout << "usage: wrapper-native-poc --assets DIR [--apple-profile] [--probe zlib|blocks|coreadi-jni|lskd-jni | --inspect LIB.so | --initialize LIB.so]\n";
                 return 0;
             } else throw std::runtime_error("unknown or incomplete argument: " + arg);
         }
         if (assets.empty() || mode.empty()) throw std::runtime_error("--assets and one operation are required");
-        loader = std::make_unique<Loader>(assets);
+        loader = std::make_unique<Loader>(assets, apple_profile);
         std::string result = "null";
         if (mode == "--probe") {
             if (library == "zlib") result = probeZlib(*loader);
             else if (library == "blocks") result = probeBlocks(*loader);
-            else throw std::runtime_error("only the reviewed zlib and Blocks ABI probes are available");
+            else if (library == "coreadi-jni" && apple_profile) result = native_poc::probeAppleJni(*loader, "libCoreADI.so");
+            else if (library == "lskd-jni" && apple_profile) result = native_poc::probeAppleJni(*loader, "libCoreLSKD.so");
+            else if (library == "tls-abi" && apple_profile) result = native_poc::probeTlsAbi(*loader);
+            else if (library == "runtime-abi" && apple_profile) result = native_poc::probeRuntimeAbi(assets);
+            else throw std::runtime_error("unknown probe or required Apple profile was not enabled");
         } else {
             loader->load(library);
             loader->relocate();
-            if (mode == "--initialize") { loader->prepareExecution(); loader->initialize(); }
+            if (mode == "--initialize") { native_poc::installCrashDiagnostics(*loader); loader->prepareExecution(apple_profile); loader->initialize(); }
         }
         std::cout << "{\"ok\":true,\"operation\":" << jsonString(mode) << ",\"target\":" << jsonString(library)
             << ",\"result\":" << result << ",\"loader\":" << loaderReport(*loader) << "}\n";

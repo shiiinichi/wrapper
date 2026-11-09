@@ -101,4 +101,6 @@ Bridge bridgeSymbol(const std::string& name) {
     return {};
 }
 
+size_t guestDestructorCount() { return destructors().size(); }
+
 } // namespace native_poc
