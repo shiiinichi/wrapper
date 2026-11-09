@@ -27,6 +27,10 @@ xcrun clang++ -arch arm64 -std=c++17 -O1 -g -Wall -Wextra -Werror \
   "$ROOT_DIR/native/macos/jni_host.cpp" \
   "$ROOT_DIR/native/macos/abi_runtime.cpp" \
   "$ROOT_DIR/native/macos/abi_selftest.cpp" \
+  "$ROOT_DIR/native/macos/services.cpp" \
+  "$ROOT_DIR/native/macos/format_bridge.cpp" \
+  "$ROOT_DIR/native/macos/posix_bridge.cpp" \
+  "$ROOT_DIR/native/macos/guest_call.S" \
   -o "$APP_BINARY"
 
 case "$MODE" in

@@ -84,7 +84,7 @@ std::string probeAppleJni(Loader& loader, const std::string& library) {
     loader.load(library);
     loader.relocate();
     installCrashDiagnostics(loader);
-    loader.prepareExecution(true);
+    loader.prepareExecution();
     loader.initialize();
     environment_functions.fill(reinterpret_cast<void*>(&unsupportedJni));
     vm_functions.fill(reinterpret_cast<void*>(&unsupportedJni));

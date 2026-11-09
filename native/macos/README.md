@@ -1,8 +1,8 @@
-# Native macOS ARM64 Apple Music library initialization
+# Native macOS ARM64 Apple Music service bootstrap
 
-This command-line experiment now executes the actual Android ARM64 Apple Music
-library initializers in a native arm64 macOS process. It uses no QEMU, Linux VM,
-APK runtime, or Rosetta. The original wrapper HTTP service remains separate.
+This experiment executes the actual Android ARM64 Apple Music initializers and
+unauthenticated service bootstrap in a native arm64 macOS process. It uses no
+QEMU, Linux VM, APK runtime, or Rosetta. The original HTTP wrapper remains separate.
 
 The original `WorldObservationLog/wrapper` `lite` baseline is
 `e51e370a6b0660ed9d722fff1add079098aeb935`. The pinned ARM64 binary source is
@@ -19,105 +19,137 @@ ARM64 Git history. No additional packages are required.
 ./script/build_and_run.sh --debug
 ```
 
-The default Run action builds the native Mach-O executable, extracts only
-pinned library blobs, and runs isolated execution and initialization probes.
-Each child has a 15-second timeout and core dumps disabled. Debug mode opens the
-actual `libandroidappmusic.so` initialization path in LLDB.
+The Run action builds the Mach-O executable, extracts only pinned library
+blobs, and runs isolated execution, initialization, and service probes. Each child
+has a 15-second timeout and core dumps disabled. Debug mode opens the actual
+`libandroidappmusic.so` initialization path in LLDB.
 
 Assets, SHA-256/Git-blob provenance (`manifest.json`), binaries, and evidence
-(`report.json`) stay under the ignored `build/native-poc/` directory. The extractor
-does not copy account data or an existing wrapper's data directory.
+(`report.json`) stay under ignored `build/native-poc/`. The default service probe
+uses a fresh temporary directory there and removes it afterward. No existing
+wrapper account data is copied.
 
-## Verified initialization milestone
+## Verified bootstrap milestone
 
-On the development Mac (macOS 27.2, arm64, 16 KiB pages), the default run verifies:
+On the development Mac (macOS 27.2, arm64, 16 KiB pages):
 
 | Target | Actual executed result |
 | --- | --- |
-| `libCoreADI.so` | Its real `JNI_OnLoad` returns JNI 1.6 |
-| `libCoreLSKD.so` | Its real `JNI_OnLoad` returns JNI 1.6 |
-| `libstoreservicescore.so` | 64 ELF initializers return; 73 including dependencies |
-| `libmediaplatform.so` | 7 ELF initializers return |
-| `libandroidappmusic.so` | 91 ELF initializers return |
-| Full Music initialization profile | 373 initializers return, including 209 in `libmedialibrarycore.so` |
+| CoreADI / CoreLSKD | Each real `JNI_OnLoad` returns JNI 1.6 |
+| StoreServicesCore | 64 initializers return; 73 including dependencies |
+| MediaPlatform | 7 initializers return |
+| AndroidAppMusic | 91 initializers return |
+| Full Music graph | 373 initializers return, including 209 in MediaLibraryCore |
+| Device identity | FootHill/DeviceGUID configuration returns error code 0; `isConfigured()` is true |
+| RequestContext | Real factory and `init` return; error code 0; manager returns the same context |
+| Local stores | Accounts, cookies, HTTP cache, and key/value SQLite databases are created and reopen successfully |
+| Presentation | Actual AndroidPresentationInterface is installed |
+| FairPlay services | RequestContext's FairPlay service and FootHill session controller are created |
+| Lease manager | Actual constructor creates a PlaybackLeaseSession using the configured context |
 
-The pinned CoreADI/CoreLSKD `JNI_OnLoad` functions do not request a JNI environment
-or register methods. The report records those counts as zero. The small JNI host
-has no Java class definitions or fabricated method registrations; unsupported
-JNI calls terminate the child.
+The pinned CoreADI/CoreLSKD JNI entry points do not request a JNI environment or
+register methods; the report records zero calls/registrations. Unsupported JNI
+functions terminate the child. The independent Android zlib round-trip/CRC and
+Blocks-to-macOS callback tests also remain.
 
-The original native zlib round-trip/CRC test and Android Blocks-to-macOS callback
-test remain independent checks.
+**This milestone is service bootstrap before sign-in.** No credentials are read,
+authentication flow started, or playback lease requested. Automatic lease refresh
+is disabled; the manager receives empty Android callbacks. Presentation callbacks
+stop unexpected credential/dialog interaction. Sign-in, manifest/key retrieval,
+FairPlay decryption, HTTP endpoints, and playback remain future work. Creating
+service objects does not prove those later operations work.
 
-**This milestone is native library initialization.** RequestContext/service
-configuration, sign-in, manifest/key retrieval, FairPlay context capture, and
-playback are not wired into the helper yet. Passing the initializers does not
-establish that every later API or full application lifetime is compatible.
-
-## Compatibility profile
+To retain a separate probe profile between invocations:
 
 ```sh
 build/native-poc/wrapper-native-poc --assets build/native-poc/assets \
-  --apple-profile --initialize libandroidappmusic.so
+  --apple-profile --probe services --data-dir build/native-poc/service-data
 ```
 
-The explicit Apple profile:
+`--data-dir` is required for this direct probe. Use a directory dedicated to the
+native experiment. Its permissions are set to `0700`; guest file writes are
+limited to that directory. The current disposable profile uses a fixed synthetic
+Android identifier, not account/device data from the Linux wrapper.
 
-* Executes the original ELF code for Music, StoreServicesCore, MediaPlatform,
+Service initialization starts real guest worker threads. Their ELF mappings have
+process lifetime: after emitting the result, this isolated child exits without
+unloading live worker code. Graceful service shutdown and reusable in-process
+embedding remain unimplemented. Other initializer probes use ordinary exit.
+
+## Compatibility profile
+
+The explicit `--apple-profile`:
+
+* Executes original ELF code for Music, StoreServicesCore, MediaPlatform,
   MediaLibraryCore, CoreADI/CoreFP/CoreLSKD, ICU, Android libc++, XML, and zlib.
-* Supplies native macOS CoreFoundation, dispatch, Blocks, and libcurl modules.
-  Binding is limited to each module's symbol family, so a dependency's libc
-  exports cannot capture guest destructor registration, pthreads, or stdio.
-  Known variadic/`va_list` interfaces remain guarded.
-* Rewrites inline Android `MRS TPIDR_EL0` reads in executable ELF sections to
-  native ARM64 adapters. The adapters save/restore GPRs, vector registers,
-  NZCV, FPCR, FPSR, LR, and SP and supply a per-thread compatibility block with
-  the stack-canary slot. The main profile adapts 24,611 reads. This does not
-  implement arbitrary ELF TLS, Linux thread structures, or all Android TLS slots.
-* Translates Android mutex/condition objects and 32-bit pthread keys through
-  owned native objects; implements real private futex WAIT/WAKE behavior and
-  relevant Linux errno values. Linux syscall numbers are never sent to Darwin.
-* Provides explicit Android stdio stream shells and typed file operations,
-  locale-category mask translation, memory/string/math functions, and an empty
-  Android-property namespace. Initializer `fopen` access is read-only.
-* Uses the pinned OpenSLES/Wilhelm ELF data solely for `SL_IID_*` interface
-  constants. These images have no executable pages, dependency services, or
-  constructor calls in this profile. Audio engine functions remain guarded.
-* Keeps guest destructor registrations in the guest registry. Full teardown,
-  dynamic unload, and guest C++ exception/unwind integration are not implemented;
-  the isolated process owns final cleanup.
+* Supplies macOS CoreFoundation, dispatch, Blocks, and libcurl modules. Binding
+  stays within each module's symbol family so dependency libc exports cannot
+  capture guest destructor registration, pthreads, or stdio. CF/curl variadic
+  interfaces remain guarded. Android logging and `snprintf`/`vsnprintf` have
+  explicit register/vector/stack and `va_list` translation. Unsupported formats
+  and binary128 long doubles stop the child.
+* Adapts inline `MRS TPIDR_EL0` reads using native ARM64 trampolines that preserve
+  GPRs, vectors, NZCV, FPCR, FPSR, LR, and SP and supply a per-thread compatibility
+  block with the canary slot. The full graph adapts 24,611 reads. Arbitrary ELF
+  TLS and all Android thread structures/slots are not implemented.
+* Translates mutex/condition/rwlock/once objects, thread attributes, and 32-bit
+  pthread keys through owned native objects. Thread creation/join and private
+  futex WAIT/WAKE perform real synchronization. Relevant Linux errno values are
+  translated; Linux syscall numbers are never sent to Darwin.
+* Provides typed Android FILE shells, locale masks, memory/string/math functions,
+  and an empty Android-property namespace. POSIX bridges translate open flags,
+  stat/flock/time structures, sysconf names, non-executable mmap, and the network
+  interface queries used for device configuration. SHA-1 uses CommonCrypto.
+  Guest writes require a dedicated data directory; initializer-only probes have
+  no writable guest directory.
+* Supports guest `dlopen`/`dlsym` only for already loaded ELF images/exports.
+  Guest handles are not Darwin handles; `dlclose` never unloads process-owned code.
+* Uses AAPCS64 adapters for nontrivial C++ return objects in `x8`. Android shared
+  pointers, strings, and callbacks never use Darwin `std::__1` object layouts.
+  Returned StoreErrorConditions are checked and destroyed by Android functions.
+* Uses OpenSLES/Wilhelm data solely for original `SL_IID_*` constants. Their code
+  is not executable; constructors and Android audio services are not started.
+* Keeps guest destructor registrations in a guest registry. Full teardown,
+  dynamic unload, and guest C++ exception/unwind integration remain unimplemented.
 
-Unimplemented function imports get named native fail-stop trampolines. Entering
-one exits with status `86`; missing data imports still prevent execution. These
-guards are visible in the report and are not successful API implementations.
-Successful Music initialization children exit normally without entering a guard.
+Unimplemented function imports get named fail-stop trampolines; entering one
+exits with status `86`. Missing data imports prevent execution. Guards are visible
+in reports and are not successful API implementations. Successful service probes
+exit 0 without entering a guard and explicitly report their process-owned lifetime.
 
 ## 4 KiB ELF / 16 KiB host pages
 
-Some older libraries place writable bytes next to code inside one macOS page.
-Strict ELF-only loading still rejects that layout. The explicit Apple
-initialization profile protects mixed pages **read/execute**, without write
-permission. The tested initialization paths do not write those bytes and return
-successfully. A later runtime write would fault: this is an initialization policy,
-not a complete writable-layout solution for all FairPlay/service operations.
+Older libraries place writable bytes next to code inside one macOS page when
+their image bias is host-page aligned. The Apple profile chooses a legal 4 KiB
+load-bias offset inside the allocation: `+4096` for CoreADI/Android libc++,
+`+12288` for CoreFP/CoreLSKD. Code/data boundaries then fall on separate host
+pages. Relative addresses remain intact, code is RX, and writable data stays RW.
+All sixteen images have zero mixed W/X pages. CoreLSKD's writes during device
+configuration now complete.
 
-No page is mapped writable and executable. Adapters and import guards are written
-before being protected RX. Host security settings, JIT entitlements, library
-validation, and SIP are not changed. The helper uses normal local ad-hoc signing.
+Larger ELF alignment gets an aligned allocation within a bounded reservation.
+Remaining code/data page conflicts still prevent execution; the earlier
+mixed-page read-only fallback is removed. Strict ELF-only inspection preserves
+the original layout for comparison.
+
+No page is writable and executable. Adapters/guards are written before becoming
+RX. Host security settings, JIT entitlements, library validation, and SIP are
+unchanged. The helper uses ordinary local ad-hoc signing.
 
 ## Evidence and tests
 
-`build/native-poc/report.json` records initializer counts, actual JNI return
-values, TLS rewrite/adapter sizes, mixed-page permissions, native host modules,
-data-only modules, skipped data-module relocations, guest destructor registrations,
-and guarded/unresolved symbols per image.
+`build/native-poc/report.json` records constructor/JNI results, service state,
+TLS adapter counts/sizes, original/effective mixed-page counts, bias offsets,
+host modules, data-only modules, guest destructors, and guarded/missing symbols.
 
-Tests exercise real Apple initialization, an independently assembled AArch64 ELF
-TLS fixture checking registers/flags/vectors and three concurrent thread contexts,
-real pthread/futex synchronization, typed FILE/errno behavior, guard activation,
-and malformed ELF rejection. Run `--verify` for the full suite.
+Tests exercise real bootstrap twice in the same directory (including spaces)
+and validate all four databases with `PRAGMA quick_check`. Independent AArch64
+fixtures check indirect returns, TLS state preservation across three threads,
+and variadic integer/vector overflow arguments. Tests also cover real pthread/
+futex/rwlock/once synchronization, POSIX layouts/write isolation, SHA-1, guard
+activation, and malformed ELF rejection. Run `--verify` for the full suite.
 
-Strict unadapted inspection remains available as a diagnostic baseline:
+Strict baseline diagnostics remain available:
 
 ```sh
 python3 native/macos/run.py --inspect-baseline
@@ -125,13 +157,16 @@ build/native-poc/wrapper-native-poc --assets build/native-poc/assets \
   --inspect libandroidappmusic.so
 ```
 
-An inspection's `ok:true` means it completed, not that the library ran.
-`constructors_initialized` and per-image `constructors_called` identify actual
-execution. `relocated_without_blockers` remains false where the original writable
-ELF layout is incompatible; `mixed_pages_readonly` records the explicit policy
-used by the successful initializer probes.
+Inspection `ok:true` means inspection completed, not that code ran. Constructor
+counts identify execution. `relocated_without_blockers` is now true for the Apple
+profile and false for incompatible strict layouts. Retained report fields
+`mixed_pages_readonly` / `mixed_pages_read_execute` are false/zero on new paths.
 
 References: [AArch64 ELF ABI](https://github.com/ARM-software/abi-aa/blob/main/aaelf64/aaelf64.rst),
+[AAPCS64](https://github.com/ARM-software/abi-aa/blob/main/aapcs64/aapcs64.rst),
 [Clang Blocks ABI](https://clang.llvm.org/docs/Block-ABI-Apple.html),
 [AOSP pthread ABI](https://android.googlesource.com/platform/bionic/+/android-5.1.1_r1/libc/include/pthread.h),
-[AOSP stdio ABI](https://android.googlesource.com/platform/bionic/+/android-5.1.1_r1/libc/include/stdio.h).
+[AOSP stdio ABI](https://android.googlesource.com/platform/bionic/+/android-5.1.1_r1/libc/include/stdio.h),
+[AOSP stat layout](https://github.com/aosp-mirror/platform_bionic/blob/android-7.1.2_r39/libc/include/sys/stat.h),
+[AOSP open/fcntl constants](https://github.com/aosp-mirror/platform_bionic/blob/android-7.1.2_r39/libc/kernel/uapi/asm-generic/fcntl.h),
+[AOSP sysconf names](https://github.com/aosp-mirror/platform_bionic/blob/android-7.1.2_r39/libc/include/sys/sysconf.h).

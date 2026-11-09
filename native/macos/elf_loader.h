@@ -36,6 +36,8 @@ struct ImageReport {
     size_t relocations_applied = 0;
     size_t weak_unresolved = 0;
     size_t mixed_write_execute_pages = 0;
+    size_t original_mixed_write_execute_pages = 0;
+    size_t load_bias_offset = 0;
     size_t constructors_called = 0;
     size_t mixed_pages_read_execute = 0;
     size_t tls_read_rewrites = 0;
@@ -70,11 +72,12 @@ private:
     std::vector<Symbol> symbols_;
     std::vector<int> page_permissions_;
     uint8_t* mapping_ = nullptr;
+    void* reservation_ = nullptr;
+    size_t reservation_size_ = 0;
     size_t mapped_size_ = 0;
     size_t allocation_size_ = 0;
     size_t thunk_used_ = 0;
     size_t page_size_ = 0;
-    uint64_t lowest_vaddr_ = 0;
     uintptr_t bias_ = 0;
     bool has_tls_ = false;
 
@@ -83,7 +86,7 @@ private:
     uint64_t tag(int64_t key, uint64_t fallback = 0) const;
     void readDynamic(const ProgramHeader& segment);
     void readSymbols();
-    void protect(bool mixed_pages_readonly);
+    void protect();
     void adaptThreadPointerReads();
 };
 
@@ -92,7 +95,7 @@ public:
     explicit Loader(std::filesystem::path assets, bool apple_profile = false);
     Image& load(const std::string& name);
     void relocate();
-    void prepareExecution(bool mixed_pages_readonly = false);
+    void prepareExecution();
     void initialize();
     void* symbol(const std::string& library, const std::string& name) const;
     const std::vector<std::unique_ptr<Image>>& images() const { return images_; }
@@ -101,7 +104,6 @@ public:
     bool complete() const;
     bool executionPrepared() const { return executable_; }
     bool initialized() const { return initialized_; }
-    bool mixedPagesReadonly() const { return mixed_pages_readonly_; }
     bool appleProfile() const { return apple_profile_; }
     std::set<std::string> nativeHostModules() const;
 
@@ -115,7 +117,6 @@ private:
     bool relocated_ = false;
     bool executable_ = false;
     bool initialized_ = false;
-    bool mixed_pages_readonly_ = false;
     bool apple_profile_ = false;
     std::map<std::string, void*> host_modules_;
 

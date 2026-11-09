@@ -8,6 +8,7 @@ import struct
 import subprocess
 import tempfile
 import unittest
+import sqlite3
 from test_fixtures import tls_fixture
 
 
@@ -55,10 +56,12 @@ class NativeLoaderTests(unittest.TestCase):
     binary: Path
     assets: Path
 
-    def call(self, mode: str, name: str, assets=None, apple_profile=False):
+    def call(self, mode: str, name: str, assets=None, apple_profile=False, data_directory=None):
         command = [str(self.binary), "--assets", str(assets or self.assets), mode, name]
         if apple_profile:
             command.append("--apple-profile")
+        if data_directory:
+            command.extend(["--data-dir", str(data_directory)])
         return subprocess.run(command,
                               capture_output=True, text=True, timeout=10)
 
@@ -70,7 +73,8 @@ class NativeLoaderTests(unittest.TestCase):
                 self.assertEqual(process.returncode, 0, result)
                 self.assertEqual(result["result"]["jni_version"], 0x10006)
                 self.assertEqual(result["result"]["get_env_calls"], 0)
-                self.assertTrue(result["loader"]["mixed_pages_readonly"])
+                self.assertFalse(result["loader"]["mixed_pages_readonly"])
+                self.assertTrue(result["loader"]["relocated_without_blockers"])
 
     def test_real_storeservices_constructor_chain_completes(self):
         process = self.call("--initialize", "libstoreservicescore.so", apple_profile=True)
@@ -116,6 +120,54 @@ class NativeLoaderTests(unittest.TestCase):
         result = self.result(process)
         self.assertEqual(process.returncode, 0, result)
         self.assertTrue(all(result["result"].values()))
+
+    def test_service_abi_uses_android_registers_structures_and_write_scope(self):
+        with tempfile.TemporaryDirectory(prefix="elf-service-abi-") as temp:
+            tls_fixture(Path(temp))
+            process = self.call("--probe", "service-abi", Path(temp), apple_profile=True)
+            result = self.result(process)
+            self.assertEqual(process.returncode, 0, result)
+            self.assertTrue(all(result["result"].values()))
+            self.assertEqual((Path(temp) / "writes/abi-file").read_bytes(), b"native-bootstrap-file")
+            self.assertFalse((Path(temp) / "outside-write").exists())
+            self.assertFalse((Path(temp) / "outside/forbidden").exists())
+
+    def test_real_services_bootstrap_persists_valid_databases_and_can_reopen(self):
+        with tempfile.TemporaryDirectory(prefix="native service data ") as temp:
+            data = Path(temp) / "isolated profile"
+            for _ in range(2):
+                process = self.call("--probe", "services", apple_profile=True, data_directory=data)
+                result = self.result(process)
+                self.assertEqual(process.returncode, 0, result)
+                for flag in ["device_configured", "request_context_initialized", "context_round_trip", "presentation_interface",
+                             "fairplay_service", "foothill_controller", "lease_session", "process_owned_lifetime"]:
+                    self.assertTrue(result["result"][flag], flag)
+                self.assertFalse(result["result"]["authenticated"])
+                self.assertFalse(result["result"]["lease_requested"])
+                self.assertFalse(result["loader"]["mixed_pages_readonly"])
+                self.assertTrue(result["loader"]["relocated_without_blockers"])
+                self.assertFalse(any(image["mixed_write_execute_pages"] for image in result["loader"]["images"]))
+                shifted = {image["library"] for image in result["loader"]["images"] if image["load_bias_offset"]}
+                self.assertEqual(shifted, {"libc++_shared.so", "libCoreFP.so", "libCoreADI.so", "libCoreLSKD.so"})
+                self.assertIn("VALID REQUEST CONTEXT", process.stderr)
+                self.assertNotIn("unimplemented Android", process.stderr)
+            for name in ["accounts", "cookies", "httpcache", "kvs"]:
+                with sqlite3.connect((data / (name + ".sqlitedb")).as_uri() + "?mode=ro", uri=True) as database:
+                    self.assertEqual(database.execute("PRAGMA quick_check").fetchall(), [("ok",)])
+                    self.assertTrue(database.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall())
+
+    def test_services_require_an_explicit_data_directory(self):
+        result = self.result(self.call("--probe", "services", apple_profile=True))
+        self.assertFalse(result["ok"])
+        self.assertIn("requires --data-dir", result["error"])
+
+    def test_excessive_alignment_is_rejected_before_reserving_memory(self):
+        def change(f):
+            offset, _ = next(item for item in f.headers if item[1][0] == 1)
+            struct.pack_into("<Q", f.data, offset + 48, 1 << 40)
+        process = self.mutated(change)
+        self.assertEqual(process.returncode, 1)
+        self.assertIn("alignment exceeds limit", self.result(process)["error"])
 
     def test_dynamic_function_guards_stop_unimplemented_calls(self):
         fixture = ElfFixture(self.assets / "libBlocksRuntime.so")

@@ -1,12 +1,17 @@
 #include "abi_selftest.h"
 #include "abi_runtime.h"
 #include "elf_loader.h"
+#include "guest_call.h"
+#include "posix_bridge.h"
 #include <array>
 #include <atomic>
 #include <chrono>
 #include <stdexcept>
 #include <thread>
 #include <cstring>
+#include <filesystem>
+#include <unistd.h>
+#include <pthread.h>
 
 namespace native_poc {
 namespace {
@@ -15,6 +20,12 @@ template <typename Function> Function bridge(const char* name) {
     auto result = runtimeBridge(name);
     if (!result.address || result.guarded || result.data) throw std::runtime_error("ABI test bridge is unavailable");
     return reinterpret_cast<Function>(result.address);
+}
+std::atomic<unsigned> once_calls{0};
+void onceCallback() { ++once_calls; }
+struct OnceTest { void* key; int (*once)(void*, void (*)()); int result = -1; };
+void* onceThread(void* pointer) {
+    auto* test = static_cast<OnceTest*>(pointer); test->result = test->once(test->key, onceCallback); return pointer;
 }
 }
 
@@ -101,6 +112,79 @@ std::string probeRuntimeAbi(const std::string& assets) {
     }
     futex_thread.join();
     check(woke == 1 && waiter_ok.load(), "futex WAIT/WAKE did not synchronize a real waiter");
-    return "{\"guest_mutex_condition\":true,\"guest_keys_isolated\":true,\"futex_wait_wake\":true,\"linux_errno\":true,\"guest_stdio\":true}";
+    alignas(8) std::array<unsigned char, 64> rwlock{};
+    auto read_lock = bridge<int (*)(void*)>("pthread_rwlock_rdlock");
+    auto write_lock = bridge<int (*)(void*)>("pthread_rwlock_wrlock");
+    auto unlock_rw = bridge<int (*)(void*)>("pthread_rwlock_unlock");
+    auto destroy_rw = bridge<int (*)(void*)>("pthread_rwlock_destroy");
+    check(read_lock(rwlock.data()) == 0 && unlock_rw(rwlock.data()) == 0 && write_lock(rwlock.data()) == 0 &&
+        unlock_rw(rwlock.data()) == 0 && destroy_rw(rwlock.data()) == 0, "guest rwlock synchronization failed");
+    uint32_t once_state = 0;
+    auto once = bridge<int (*)(void*, void (*)())>("pthread_once");
+    auto create_thread = bridge<int (*)(pthread_t*, const void*, void* (*)(void*), void*)>("pthread_create");
+    auto join_thread = bridge<int (*)(pthread_t, void**)>("pthread_join");
+    std::array<OnceTest, 2> tests{{{&once_state, once}, {&once_state, once}}};
+    std::array<pthread_t, 2> threads{};
+    for (size_t i = 0; i < threads.size(); ++i) check(create_thread(&threads[i], nullptr, onceThread, &tests[i]) == 0, "guest pthread_create failed");
+    for (size_t i = 0; i < threads.size(); ++i) {
+        void* result = nullptr;
+        check(join_thread(threads[i], &result) == 0 && result == &tests[i] && tests[i].result == 0, "guest pthread_join failed");
+    }
+    check(once(&once_state, onceCallback) == 0 && once_calls == 1, "guest pthread_once repeated its callback");
+    return "{\"guest_mutex_condition\":true,\"guest_keys_isolated\":true,\"futex_wait_wake\":true,\"linux_errno\":true,\"guest_stdio\":true,\"rwlocks_threads_once\":true}";
+}
+
+std::string probeServiceAbi(Loader& loader, const std::string& assets) {
+    loader.load("tls-fixture.so"); loader.relocate(); loader.prepareExecution(); loader.initialize();
+    auto* sret = loader.symbol("tls-fixture.so", "sret_probe");
+    std::array<uintptr_t, 6> output{};
+    callGuestReturn(sret, output.data(), reinterpret_cast<void*>(0x11), reinterpret_cast<void*>(0x22),
+        reinterpret_cast<void*>(0x33), reinterpret_cast<void*>(0x44), reinterpret_cast<void*>(0x55), reinterpret_cast<void*>(0x66));
+    check(output == std::array<uintptr_t, 6>{0x11, 0x22, 0x33, 0x44, 0x55, 0x66}, "ARM64 indirect return moved named arguments");
+    std::array<char, 256> text{};
+    auto formatter = reinterpret_cast<int (*)(void*, char*)>(loader.symbol("tls-fixture.so", "format_probe"));
+    int length = formatter(runtimeBridge("snprintf").address, text.data());
+    constexpr char expected[] = "7 -9 1234 abc B 3.25 305419896    abc 0.5 0.5 0.5 0.5 0.5 0.5 0.5 3.5";
+    check(length == sizeof(expected) - 1 && std::strcmp(text.data(), expected) == 0, "Android variadic register/stack formatting failed");
+    auto open_image = bridge<void* (*)(const char*, int)>("dlopen");
+    auto find_symbol = bridge<void* (*)(void*, const char*)>("dlsym");
+    auto close_image = bridge<int (*)(void*)>("dlclose");
+    auto* handle = open_image("/guest/lib64/tls-fixture.so", 2);
+    check(handle && find_symbol(handle, "sret_probe") == sret && close_image(handle) == 0, "guest dynamic lookup did not use loaded ELF symbols");
+
+    auto directory = assets + "/writes";
+    std::filesystem::create_directory(directory); setRuntimeDirectory(directory);
+    auto open_file = bridge<int (*)(const char*, int, unsigned)>("open");
+    auto close_file = bridge<int (*)(int)>("close");
+    auto write_file = bridge<ssize_t (*)(int, const void*, size_t)>("write");
+    auto read_file = bridge<ssize_t (*)(int, void*, size_t, int64_t)>("pread");
+    auto stat_file = bridge<int (*)(int, void*)>("fstat");
+    int fd = open_file((directory + "/abi-file").c_str(), 2 | 0100 | 0200, 0600);
+    check(fd >= 0, "Android open flags were not translated");
+    constexpr char payload[] = "native-bootstrap-file";
+    check(write_file(fd, payload, sizeof(payload) - 1) == sizeof(payload) - 1, "Android file write failed");
+    std::array<unsigned char, 144> status; status.fill(0xa5);
+    check(stat_file(fd, status.data()) == 0, "Android stat failed");
+    int64_t bytes = 0; std::memcpy(&bytes, status.data() + 48, 8);
+    check(bytes == sizeof(payload) - 1 && status[128] == 0xa5 && status[143] == 0xa5, "Android stat layout overwrote caller storage");
+    std::array<char, 64> contents{};
+    check(read_file(fd, contents.data(), contents.size(), 0) == sizeof(payload) - 1 && std::strcmp(contents.data(), payload) == 0, "Android pread changed file bytes");
+    check(close_file(fd) == 0, "Android close failed");
+    check(open_file((directory + "/abi-file").c_str(), 2 | 0100 | 0200, 0600) == -1 && guestErrno() == 17, "Android O_EXCL did not preserve existing files");
+    check(open_file((assets + "/outside-write").c_str(), 1 | 0100, 0600) == -1 && guestErrno() == 13, "guest file writes escaped the dedicated directory");
+    std::filesystem::create_directory(assets + "/outside");
+    std::filesystem::create_directory_symlink(assets + "/outside", directory + "/escape");
+    check(open_file((directory + "/escape/forbidden").c_str(), 1 | 0100, 0600) == -1 && guestErrno() == 13, "guest writes followed a symlink outside the dedicated directory");
+    auto get_time = bridge<int (*)(void*, void*)>("gettimeofday");
+    std::array<int64_t, 3> time{0, 0, 0x123456789};
+    check(get_time(time.data(), nullptr) == 0 && time[0] > 0 && time[1] >= 0 && time[1] < 1000000 && time[2] == 0x123456789, "Android timeval layout changed");
+    auto config = bridge<long (*)(int)>("sysconf");
+    check(config(0x27) == getpagesize() && config(0x7fffffff) == -1 && guestErrno() == 22, "Android sysconf names were not translated");
+    auto sha1 = bridge<unsigned char* (*)(const void*, size_t, unsigned char*)>("SHA1");
+    std::array<unsigned char, 20> hash{};
+    const unsigned char digest[] = {0xa9,0x99,0x3e,0x36,0x47,0x06,0x81,0x6a,0xba,0x3e,0x25,0x71,0x78,0x50,0xc2,0x6c,0x9c,0xd0,0xd8,0x9d};
+    check(sha1("abc", 3, hash.data()) == hash.data() && std::memcmp(hash.data(), digest, 20) == 0, "SHA1 adapter changed the standard digest");
+    return "{\"indirect_return\":true,\"guest_variadic_format\":true,\"elf_dynamic_lookup\":true,\"android_file_stat\":true,"
+        "\"isolated_writes\":true,\"time_sysconf\":true,\"sha1\":true}";
 }
 }

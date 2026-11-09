@@ -144,8 +144,35 @@ Image::Image(const std::filesystem::path& path, bool reserve_tls_adapters) {
                     throw std::runtime_error("overlapping ELF load segments");
             }
         }
-        lowest_vaddr_ = low;
-        mapped_size_ = static_cast<size_t>(high - low);
+        // PT_LOAD alignment constrains the bias to 4 KiB, not necessarily the
+        // host's 16 KiB page size. Choose a legal in-allocation offset that
+        // separates code and writable data on host pages. Relative addresses,
+        // instructions, pointers and ELF segment alignment all remain intact.
+        uint64_t required_alignment = 4096;
+        for (const auto& ph : segments_) if (ph.type == kLoad) required_alignment = std::max(required_alignment, ph.align);
+        auto permissionsAt = [&](size_t shift) {
+            std::vector<int> permissions(alignUp(high - low + shift, page_size_) / page_size_, PROT_NONE);
+            for (const auto& ph : segments_) {
+                if (ph.type != kLoad || !ph.memsz) continue;
+                int flags = ((ph.flags & 4) ? PROT_READ : 0) | ((ph.flags & 2) ? PROT_WRITE : 0) | ((ph.flags & 1) ? PROT_EXEC : 0);
+                size_t first = (ph.vaddr - low + shift) / page_size_;
+                size_t end = alignUp(add(ph.vaddr, ph.memsz) - low + shift, page_size_) / page_size_;
+                for (size_t i = first; i < end; ++i) permissions[i] |= flags;
+            }
+            return permissions;
+        };
+        auto conflicts = [](const std::vector<int>& pages) {
+            return std::count_if(pages.begin(), pages.end(), [](int flags) { return (flags & (PROT_WRITE | PROT_EXEC)) == (PROT_WRITE | PROT_EXEC); });
+        };
+        page_permissions_ = permissionsAt(0);
+        report.original_mixed_write_execute_pages = conflicts(page_permissions_);
+        if (reserve_tls_adapters && report.original_mixed_write_execute_pages) {
+            for (size_t shift = required_alignment; shift < page_size_; shift += required_alignment) {
+                auto candidate = permissionsAt(shift);
+                if (!conflicts(candidate)) { report.load_bias_offset = shift; page_permissions_ = std::move(candidate); break; }
+            }
+        }
+        mapped_size_ = page_permissions_.size() * page_size_;
         size_t adapter_bytes = 0;
         if (reserve_tls_adapters) {
             if (!header.shnum || header.shentsize != sizeof(Section) ||
@@ -163,22 +190,23 @@ Image::Image(const std::filesystem::path& path, bool reserve_tls_adapters) {
             adapter_bytes = alignUp(count * 384, page_size_);
         }
         allocation_size_ = mapped_size_ + adapter_bytes;
-        void* memory = mmap(nullptr, allocation_size_, PROT_READ | PROT_WRITE,
+        if (required_alignment > kMaximumImage) throw std::runtime_error("ELF alignment exceeds limit");
+        reservation_size_ = allocation_size_ + (required_alignment > page_size_ ? required_alignment : 0);
+        void* memory = mmap(nullptr, reservation_size_, PROT_NONE,
                             MAP_PRIVATE | MAP_ANON, -1, 0);
         if (memory == MAP_FAILED) throw std::runtime_error("mmap failed: " + std::string(std::strerror(errno)));
-        mapping_ = static_cast<uint8_t*>(memory);
-        bias_ = reinterpret_cast<uintptr_t>(mapping_) - low;
+        reservation_ = memory;
+        uintptr_t address = reinterpret_cast<uintptr_t>(memory);
+        if (required_alignment > page_size_) address = alignUp(address - low, required_alignment) + low;
+        mapping_ = reinterpret_cast<uint8_t*>(address);
+        if (mprotect(mapping_, allocation_size_, PROT_READ | PROT_WRITE)) throw std::runtime_error("ELF writable mapping failed");
+        bias_ = reinterpret_cast<uintptr_t>(mapping_) + report.load_bias_offset - low;
+        if (bias_ % required_alignment) throw std::runtime_error("mapped ELF load bias violates PT_LOAD alignment");
         report.mapped_bytes = mapped_size_;
-        report.reserved_bytes = allocation_size_;
-        page_permissions_.resize(mapped_size_ / page_size_, PROT_NONE);
+        report.reserved_bytes = reservation_size_;
         for (const auto& ph : segments_) {
             if (ph.type != kLoad || !ph.memsz) continue;
-            if (ph.filesz) std::memcpy(mapping_ + ph.vaddr - low, file_.data() + ph.offset, ph.filesz);
-            int permissions = ((ph.flags & 4) ? PROT_READ : 0) |
-                ((ph.flags & 2) ? PROT_WRITE : 0) | ((ph.flags & 1) ? PROT_EXEC : 0);
-            size_t first = static_cast<size_t>((ph.vaddr - low) / page_size_);
-            size_t end = static_cast<size_t>((alignUp(add(ph.vaddr, ph.memsz), page_size_) - low) / page_size_);
-            for (size_t page = first; page < end; ++page) page_permissions_[page] |= permissions;
+            if (ph.filesz) std::memcpy(reinterpret_cast<void*>(bias_ + ph.vaddr), file_.data() + ph.offset, ph.filesz);
         }
         for (int permissions : page_permissions_)
             if ((permissions & (PROT_WRITE | PROT_EXEC)) == (PROT_WRITE | PROT_EXEC))
@@ -195,21 +223,22 @@ Image::Image(const std::filesystem::path& path, bool reserve_tls_adapters) {
             report.needed.push_back(name);
         }
     } catch (...) {
-        if (mapping_) munmap(mapping_, allocation_size_);
+        if (reservation_) munmap(reservation_, reservation_size_);
         mapping_ = nullptr;
+        reservation_ = nullptr;
         throw;
     }
 }
 
 Image::~Image() {
-    if (mapping_) munmap(mapping_, allocation_size_);
+    if (reservation_) munmap(reservation_, reservation_size_);
 }
 
 const uint8_t* Image::at(uint64_t vaddr, size_t count) const {
     uint64_t end = add(vaddr, count);
     for (const auto& ph : segments_) {
         if (ph.type == kLoad && vaddr >= ph.vaddr && end <= add(ph.vaddr, ph.memsz))
-            return mapping_ + vaddr - lowest_vaddr_;
+            return reinterpret_cast<const uint8_t*>(bias_ + vaddr);
     }
     throw std::runtime_error(report.library + ": dynamic address outside PT_LOAD: " + hex(vaddr));
 }
@@ -384,18 +413,10 @@ void Image::adaptThreadPointerReads() {
     }
 }
 
-void Image::protect(bool mixed_pages_readonly) {
+void Image::protect() {
     if (report.data_only) for (auto& permissions : page_permissions_) permissions &= ~PROT_EXEC;
-    if (report.mixed_write_execute_pages && !mixed_pages_readonly)
+    if (report.mixed_write_execute_pages && !report.data_only)
         throw std::runtime_error(report.library + ": 4 KiB ELF segments share a writable/executable host page");
-    if (mixed_pages_readonly) {
-        for (auto& permissions : page_permissions_) {
-            if ((permissions & (PROT_WRITE | PROT_EXEC)) == (PROT_WRITE | PROT_EXEC)) {
-                permissions &= ~PROT_WRITE;
-                ++report.mixed_pages_read_execute;
-            }
-        }
-    }
     for (size_t first = 0; first < page_permissions_.size();) {
         size_t end = first + 1;
         while (end < page_permissions_.size() && page_permissions_[end] == page_permissions_[first]) ++end;
@@ -407,7 +428,7 @@ void Image::protect(bool mixed_pages_readonly) {
     // span faults on Apple Silicon; flush only the actual executable segments.
     for (const auto& ph : segments_) {
         if (ph.type == kLoad && (ph.flags & 1) && ph.memsz) {
-            auto* start = reinterpret_cast<char*>(mapping_ + ph.vaddr - lowest_vaddr_);
+            auto* start = reinterpret_cast<char*>(bias_ + ph.vaddr);
             __builtin___clear_cache(start, start + ph.memsz);
         }
     }
@@ -582,20 +603,17 @@ bool Loader::complete() const {
     return true;
 }
 
-void Loader::prepareExecution(bool mixed_pages_readonly) {
+void Loader::prepareExecution() {
     if (executable_) throw std::runtime_error("execution has already been prepared");
     if (!relocated_) throw std::runtime_error("relocations have not been applied");
-    for (const auto& issue : issues_)
-        if (!mixed_pages_readonly || issue.kind != "page_permissions")
-            throw std::runtime_error("dependency, relocation, or page-layout blockers prevent execution");
+    if (!issues_.empty()) throw std::runtime_error("dependency, relocation, or page-layout blockers prevent execution");
     for (const auto& image : images_)
         if (!image->report.missing_symbols.empty()) throw std::runtime_error("unresolved imports prevent execution");
     for (auto& image : images_) {
         if (apple_profile_ && !image->report.data_only) image->adaptThreadPointerReads();
-        image->protect(mixed_pages_readonly);
+        image->protect();
     }
-    if (apple_profile_) finishImportGuards();
-    mixed_pages_readonly_ = mixed_pages_readonly;
+    if (apple_profile_) { finishImportGuards(); bindRuntimeLoader(this); }
     executable_ = true;
 }
 
@@ -666,7 +684,7 @@ std::string loaderReport(const Loader& loader) {
         << ",\"execution_prepared\":" << (loader.executionPrepared() ? "true" : "false")
         << ",\"constructors_initialized\":" << (loader.initialized() ? "true" : "false")
         << ",\"guarded_imports_are_traps\":true"
-        << ",\"mixed_pages_readonly\":" << (loader.mixedPagesReadonly() ? "true" : "false")
+        << ",\"mixed_pages_readonly\":false"
         << ",\"apple_host_profile\":" << (loader.appleProfile() ? "true" : "false")
         << ",\"guest_destructors_registered\":" << guestDestructorCount()
         << ",\"native_host_libraries\":";
@@ -692,6 +710,8 @@ std::string loaderReport(const Loader& loader) {
             << ",\"data_only\":" << (r.data_only ? "true" : "false")
             << ",\"relocations_applied\":" << r.relocations_applied << ",\"weak_unresolved\":" << r.weak_unresolved
             << ",\"mixed_write_execute_pages\":" << r.mixed_write_execute_pages
+            << ",\"original_mixed_write_execute_pages\":" << r.original_mixed_write_execute_pages
+            << ",\"load_bias_offset\":" << r.load_bias_offset
             << ",\"mixed_pages_read_execute\":" << r.mixed_pages_read_execute
             << ",\"tls_read_rewrites\":" << r.tls_read_rewrites
             << ",\"tls_adapter_bytes\":" << r.tls_adapter_bytes

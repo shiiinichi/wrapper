@@ -1,6 +1,6 @@
 # wrapper-lite
 
-The experimental native macOS ARM64 ELF loader is documented in
+The experimental native macOS ARM64 Apple Music service bootstrap is documented in
 [`native/macos/README.md`](native/macos/README.md). Run its isolated probes with
 `./script/build_and_run.sh`. The experiment is separate from the HTTP service.
 

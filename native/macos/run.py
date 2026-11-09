@@ -7,15 +7,18 @@ from pathlib import Path
 import platform
 import subprocess
 import sys
+import tempfile
 
 ROOT = Path(__file__).resolve().parents[2]
 BUILD = ROOT / "build/native-poc"
 
 
-def invoke(binary: Path, assets: Path, mode: str, target: str, apple_profile=False) -> dict:
+def invoke(binary: Path, assets: Path, mode: str, target: str, apple_profile=False, data_directory=None) -> dict:
     command = [str(binary), "--assets", str(assets), mode, target]
     if apple_profile:
         command.append("--apple-profile")
+    if data_directory:
+        command.extend(["--data-dir", str(data_directory)])
     try:
         process = subprocess.run(command, cwd=ROOT, capture_output=True, text=True, timeout=15)
         try:
@@ -41,7 +44,7 @@ def main() -> int:
         parser.error("run on native arm64 macOS; Rosetta/Linux/QEMU are not this experiment")
     manifest = json.loads((args.assets / "manifest.json").read_text())
     report = {"platform": platform.platform(), "asset_source_commit": manifest["source_commit"],
-              "native_probes": {}, "apple_initialization": {}, "apple_library_inspection": {}}
+              "native_probes": {}, "apple_initialization": {}, "service_bootstrap": {}, "apple_library_inspection": {}}
     for target in ["zlib", "blocks"]:
         result = invoke(args.binary, args.assets, "--probe", target)
         report["native_probes"][target] = result
@@ -60,6 +63,15 @@ def main() -> int:
         print(f"Apple init {name}: {'PASS' if result.get('ok') else 'FAIL'}; {constructors} constructors; {tls} TLS reads adapted")
         if not result.get("ok"):
             print("  " + str(result.get("error", result.get("stderr", "initialization failed"))))
+    args.report.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix="service-probe-", dir=args.report.parent) as directory:
+        result = invoke(args.binary, args.assets, "--probe", "services", apple_profile=True, data_directory=directory)
+        report["service_bootstrap"] = result
+    print(f"Native Apple services: {'PASS' if result.get('ok') else 'FAIL'}; isolated unauthenticated profile")
+    if result.get("result"):
+        print("  " + json.dumps(result["result"]))
+    if not result.get("ok"):
+        print("  " + str(result.get("error", result.get("stderr", "bootstrap failed"))))
     baseline = ["libCoreADI.so", "libCoreLSKD.so", "libstoreservicescore.so", "libandroidappmusic.so"] if args.inspect_baseline else []
     for name in baseline:
         result = invoke(args.binary, args.assets, "--inspect", name)
@@ -75,7 +87,7 @@ def main() -> int:
     args.report.parent.mkdir(parents=True, exist_ok=True)
     args.report.write_text(json.dumps(report, indent=2) + "\n")
     print(f"Report: {args.report}")
-    results = [*report["native_probes"].values(), *report["apple_initialization"].values(), *report["apple_library_inspection"].values()]
+    results = [*report["native_probes"].values(), *report["apple_initialization"].values(), report["service_bootstrap"], *report["apple_library_inspection"].values()]
     return 0 if all(result.get("ok") and result.get("exit_code") == 0 for result in results) else 1
 
 

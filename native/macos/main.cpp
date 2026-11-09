@@ -1,6 +1,7 @@
 #include "elf_loader.h"
 #include "jni_host.h"
 #include "abi_selftest.h"
+#include "services.h"
 
 #if !defined(__APPLE__) || !defined(__aarch64__)
 #error "This proof of concept must be compiled as a native arm64 macOS executable."
@@ -118,13 +119,14 @@ int main(int argc, char** argv) {
     rlimit core{0, 0};
     setrlimit(RLIMIT_CORE, &core);
     std::unique_ptr<Loader> loader;
-    std::string assets, mode, library;
+    std::string assets, mode, library, data_directory;
     bool apple_profile = false;
     try {
         for (int i = 1; i < argc; ++i) {
             std::string arg = argv[i];
-            if ((arg == "--assets" || arg == "--probe" || arg == "--inspect" || arg == "--initialize") && i + 1 < argc) {
+            if ((arg == "--assets" || arg == "--data-dir" || arg == "--probe" || arg == "--inspect" || arg == "--initialize") && i + 1 < argc) {
                 if (arg == "--assets") assets = argv[++i];
+                else if (arg == "--data-dir") data_directory = argv[++i];
                 else {
                     if (!mode.empty()) throw std::runtime_error("choose exactly one probe/inspect/initialize mode");
                     mode = arg;
@@ -133,7 +135,7 @@ int main(int argc, char** argv) {
             } else if (arg == "--apple-profile") {
                 apple_profile = true;
             } else if (arg == "--help") {
-                std::cout << "usage: wrapper-native-poc --assets DIR [--apple-profile] [--probe zlib|blocks|coreadi-jni|lskd-jni | --inspect LIB.so | --initialize LIB.so]\n";
+                std::cout << "usage: wrapper-native-poc --assets DIR [--apple-profile] [--probe zlib|blocks|coreadi-jni|lskd-jni|services | --inspect LIB.so | --initialize LIB.so] [--data-dir DIR]\n";
                 return 0;
             } else throw std::runtime_error("unknown or incomplete argument: " + arg);
         }
@@ -147,18 +149,24 @@ int main(int argc, char** argv) {
             else if (library == "lskd-jni" && apple_profile) result = native_poc::probeAppleJni(*loader, "libCoreLSKD.so");
             else if (library == "tls-abi" && apple_profile) result = native_poc::probeTlsAbi(*loader);
             else if (library == "runtime-abi" && apple_profile) result = native_poc::probeRuntimeAbi(assets);
+            else if (library == "services" && apple_profile) result = native_poc::probeServices(*loader, data_directory);
+            else if (library == "service-abi" && apple_profile) result = native_poc::probeServiceAbi(*loader, assets);
             else throw std::runtime_error("unknown probe or required Apple profile was not enabled");
         } else {
             loader->load(library);
             loader->relocate();
-            if (mode == "--initialize") { native_poc::installCrashDiagnostics(*loader); loader->prepareExecution(apple_profile); loader->initialize(); }
+            if (mode == "--initialize") { native_poc::installCrashDiagnostics(*loader); loader->prepareExecution(); loader->initialize(); }
         }
         std::cout << "{\"ok\":true,\"operation\":" << jsonString(mode) << ",\"target\":" << jsonString(library)
             << ",\"result\":" << result << ",\"loader\":" << loaderReport(*loader) << "}\n";
+        // Services own background ELF workers. This isolated probe gives their
+        // images process lifetime; do not unmap live worker instructions.
+        if (mode == "--probe" && library == "services") { std::cout.flush(); std::_Exit(0); }
         return 0;
     } catch (const std::exception& error) {
         std::cout << "{\"ok\":false,\"error\":" << jsonString(error.what()) << ",\"loader\":"
             << (loader ? loaderReport(*loader) : "null") << "}\n";
+        if (mode == "--probe" && library == "services") { std::cout.flush(); std::_Exit(1); }
         return 1;
     }
 }
