@@ -9,6 +9,10 @@ import subprocess
 import tempfile
 import unittest
 import sqlite3
+import ssl
+import threading
+import plistlib
+from http.server import HTTPServer, BaseHTTPRequestHandler
 from test_fixtures import tls_fixture
 
 
@@ -101,8 +105,11 @@ class NativeLoaderTests(unittest.TestCase):
         self.assertEqual(images["libOpenSLES.so"]["constructors_called"], 0)
         self.assertFalse(any(image["missing_symbols"] for image in images.values()))
         guarded = {name for image in images.values() for name in image["guarded_symbols"]}
-        self.assertIn("CFStringCreateWithFormat", guarded)
-        self.assertIn("curl_easy_setopt", guarded)
+        self.assertNotIn("CFStringCreateWithFormat", guarded)
+        self.assertNotIn("CFStringAppendFormat", guarded)
+        self.assertNotIn("curl_easy_setopt", guarded)
+        self.assertNotIn("curl_share_setopt", guarded)
+        self.assertFalse(images["libCoreADI.so"]["guarded_symbols"])
 
     def test_tls_adaptation_preserves_machine_state_and_thread_isolation(self):
         with tempfile.TemporaryDirectory(prefix="elf-tls-abi-") as temp:
@@ -112,6 +119,14 @@ class NativeLoaderTests(unittest.TestCase):
         self.assertEqual(process.returncode, 0, result)
         self.assertEqual(result["result"], {"state_preserved": True, "independent_threads": 3})
         self.assertEqual(result["loader"]["images"][0]["tls_read_rewrites"], 1)
+
+    def test_corefoundation_formats_guest_registers_objects_positions_and_va_lists(self):
+        with tempfile.TemporaryDirectory(prefix="native-cf-format-") as temp:
+            tls_fixture(Path(temp))
+            process = self.call("--probe", "corefoundation-abi", Path(temp), apple_profile=True)
+            result = self.result(process)
+        self.assertEqual(process.returncode, 0, result)
+        self.assertTrue(all(result["result"].values()))
 
     def test_guest_pthread_and_futex_synchronize_real_threads(self):
         with tempfile.TemporaryDirectory(prefix="elf-runtime-abi-") as temp:
@@ -147,6 +162,7 @@ class NativeLoaderTests(unittest.TestCase):
                 self.assertFalse(result["loader"]["mixed_pages_readonly"])
                 self.assertTrue(result["loader"]["relocated_without_blockers"])
                 self.assertFalse(any(image["mixed_write_execute_pages"] for image in result["loader"]["images"]))
+                self.assertGreaterEqual(result["loader"]["native_sqlite_opened"], 4)
                 shifted = {image["library"] for image in result["loader"]["images"] if image["load_bias_offset"]}
                 self.assertEqual(shifted, {"libc++_shared.so", "libCoreFP.so", "libCoreADI.so", "libCoreLSKD.so"})
                 self.assertIn("VALID REQUEST CONTEXT", process.stderr)
@@ -168,6 +184,85 @@ class NativeLoaderTests(unittest.TestCase):
         process = self.mutated(change)
         self.assertEqual(process.returncode, 1)
         self.assertIn("alignment exceeds limit", self.result(process)["error"])
+
+    def test_real_authentication_flow_cancels_at_credentials_without_login(self):
+        with tempfile.TemporaryDirectory(prefix="native-auth-preflight-") as temp:
+            result = self.result(self.call("--probe", "auth-preflight", apple_profile=True, data_directory=temp))
+        self.assertTrue(result["ok"], result)
+        self.assertEqual(result["result"]["credential_requests"], 1)
+        self.assertTrue(result["result"]["cancelled"])
+        self.assertFalse(result["result"]["authenticated"])
+        self.assertEqual(result["result"]["verification_requests"], 0)
+
+    def test_guest_credentials_keep_long_password_and_code_with_persistent_identity(self):
+        with tempfile.TemporaryDirectory(prefix="native-auth-abi-") as temp:
+            process = self.call("--probe", "auth-abi", apple_profile=True, data_directory=temp)
+            result = self.result(process)
+            identity = (Path(temp) / "native-device-id").read_text()
+            self.assertRegex(identity, r"^[0-9a-f]{16}$")
+            self.assertEqual((Path(temp) / "native-device-id").stat().st_mode & 0o777, 0o600)
+        self.assertEqual(process.returncode, 0, result)
+        self.assertTrue(result["result"]["long_password_2fa_round_trip"])
+        self.assertTrue(result["result"]["profile_identity_persistent"])
+        self.assertFalse(result["result"]["credentials_submitted"])
+
+    def test_login_prompt_cancel_returns_nonzero_without_success(self):
+        with tempfile.TemporaryDirectory(prefix="native-auth-cancel-") as temp:
+            script = Path(temp) / "cancel.applescript"
+            script.write_text('error number -128\n')
+            process = subprocess.run([str(self.binary), "--assets", str(self.assets), "--apple-profile", "--probe", "auth-login",
+                                      "--data-dir", temp, "--prompt-script", str(script)], capture_output=True, text=True, timeout=20)
+            result = self.result(process)
+        self.assertNotEqual(process.returncode, 0, result)
+        self.assertFalse(result["ok"])
+        # Without network access, preflight fails before the prompt. With it,
+        # the deliberately cancelled prompt must remain a failed login.
+        if result.get("result"):
+            self.assertTrue(result["result"]["cancelled"])
+            self.assertFalse(result["result"]["authenticated"])
+
+    def test_protocol_dialog_script_reads_private_unicode_payload_without_ui(self):
+        script = Path(__file__).with_name("sign_in.applescript")
+        payload = {"title": "Native dialog", "message": "Quotes: \" and Unicode: 音楽", "buttons": ["1. Continue", "2. Cancel"]}
+        process = subprocess.run(["/usr/bin/osascript", str(script), "dialog", "parse-only"],
+                                 input=plistlib.dumps(payload), capture_output=True, timeout=15)
+        self.assertEqual(process.returncode, 0, process.stderr)
+        self.assertEqual(process.stdout.strip(), b"2")
+
+    def test_curl_option_callback_and_info_adapters_transfer_exact_bytes(self):
+        with tempfile.TemporaryDirectory(prefix="native-curl-abi-") as temp:
+            (Path(temp) / "transfer.txt").write_text("native-curl-typed-transfer\n")
+            process = self.call("--probe", "network-abi", Path(temp), apple_profile=True)
+            result = self.result(process)
+        self.assertEqual(process.returncode, 0, result)
+        self.assertTrue(result["result"]["curl_typed_options"])
+        self.assertTrue(result["result"]["curl_typed_info"])
+
+    def test_curl_keeps_tls_verification_enabled_against_untrusted_server(self):
+        class Handler(BaseHTTPRequestHandler):
+            def log_message(self, *_):
+                pass
+        with tempfile.TemporaryDirectory(prefix="native-curl-tls-") as temp:
+            root = Path(temp)
+            subprocess.run(["/usr/bin/openssl", "req", "-x509", "-newkey", "rsa:2048", "-nodes", "-days", "1",
+                            "-subj", "/CN=localhost", "-keyout", str(root / "key.pem"), "-out", str(root / "cert.pem")],
+                           check=True, capture_output=True)
+            server = HTTPServer(("127.0.0.1", 0), Handler)
+            context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+            context.load_cert_chain(root / "cert.pem", root / "key.pem")
+            server.socket = context.wrap_socket(server.socket, server_side=True)
+            thread = threading.Thread(target=server.serve_forever, kwargs={"poll_interval": 0.05}, daemon=True)
+            thread.start()
+            (root / "network-test-url").write_text(f"https://127.0.0.1:{server.server_port}/")
+            try:
+                process = self.call("--probe", "network-abi", root, apple_profile=True)
+            finally:
+                server.shutdown()
+                server.server_close()
+                thread.join()
+            result = self.result(process)
+        self.assertEqual(process.returncode, 0, result)
+        self.assertTrue(result["result"]["untrusted_tls_rejected"])
 
     def test_dynamic_function_guards_stop_unimplemented_calls(self):
         fixture = ElfFixture(self.assets / "libBlocksRuntime.so")

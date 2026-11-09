@@ -8,9 +8,13 @@
 #include <cstring>
 #include <vector>
 #include <unistd.h>
+#include <atomic>
+#include <CoreFoundation/CoreFoundation.h>
+#include <dlfcn.h>
 
 namespace native_poc {
 namespace {
+std::atomic<bool> logging_enabled{true};
 // Android AAPCS64 va_list. Darwin's va_list is a different type and is never
 // passed a guest object. Register arguments are captured by guest_call.S.
 struct Arguments {
@@ -95,28 +99,105 @@ int vsnprintfBridge(char* buffer, size_t capacity, const char* source, const Arg
     return copyFormat(buffer, capacity, format(source, *arguments));
 }
 int logWrite(int, const char* tag, const char* message) {
+    if (!logging_enabled) return 0;
     std::fprintf(stderr, "android[%s]: %s\n", tag ? tag : "", message ? message : ""); return message ? static_cast<int>(std::strlen(message)) : 0;
 }
 int logVprint(int priority, const char* tag, const char* source, const Arguments* arguments) {
+    if (!logging_enabled) return 0;
     auto text = format(source, *arguments); return logWrite(priority, tag, text.c_str());
+}
+std::vector<uint64_t> cfArguments(CFStringRef source, Arguments args) {
+    CFIndex length = CFStringGetMaximumSizeForEncoding(CFStringGetLength(source), kCFStringEncodingUTF8);
+    if (length < 0 || length > 1024 * 1024) unsupported("CoreFoundation format length");
+    std::vector<char> utf8(static_cast<size_t>(length) + 1);
+    if (!CFStringGetCString(source, utf8.data(), utf8.size(), kCFStringEncodingUTF8)) unsupported("CoreFoundation format encoding");
+    // Derive argument classes by position, then consume AAPCS64 GP/FP areas in
+    // call order. Darwin va_list is a pointer to consecutive 8-byte stack slots.
+    std::vector<char> kinds;
+    size_t next = 0;
+    auto assign = [&](size_t index, char kind) {
+        if (index >= 64) unsupported("CoreFoundation argument count");
+        if (kinds.size() <= index) kinds.resize(index + 1, 0);
+        if (kinds[index] && kinds[index] != kind) unsupported("CoreFoundation positional argument type");
+        kinds[index] = kind;
+    };
+    auto position = [&](const char*& p) -> size_t {
+        const char* saved = p; size_t value = 0;
+        while (std::isdigit(static_cast<unsigned char>(*p))) { value = value * 10 + (*p++ - '0'); if (value > 1000000) unsupported("CoreFoundation format index"); }
+        if (*p == '$') { ++p; if (!value || value > 64) unsupported("CoreFoundation format index"); return value - 1; }
+        p = saved; return SIZE_MAX;
+    };
+    for (const char* p = utf8.data(); *p;) {
+        if (*p++ != '%') continue;
+        if (*p == '%') { ++p; continue; }
+        size_t index = position(p);
+        while (*p && std::strchr("-+ #0'", *p)) ++p;
+        if (*p == '*') { ++p; auto width = position(p); assign(width == SIZE_MAX ? next++ : width, 'g'); }
+        else while (std::isdigit(static_cast<unsigned char>(*p))) ++p;
+        if (*p == '.') {
+            ++p;
+            if (*p == '*') { ++p; auto precision = position(p); assign(precision == SIZE_MAX ? next++ : precision, 'g'); }
+            else while (std::isdigit(static_cast<unsigned char>(*p))) ++p;
+        }
+        if (*p == 'L') unsupported("CoreFoundation binary128 argument");
+        if (*p && std::strchr("hljztq", *p)) { char first = *p++; if ((*p == 'h' || *p == 'l') && *p == first) ++p; }
+        char kind = *p && std::strchr("fFeEgGaA", *p) ? 'f' : 'g';
+        if (!*p || !std::strchr("@diDuUoOxXcCsSpfFeEgGaA", *p)) unsupported("CoreFoundation format specifier");
+        assign(index == SIZE_MAX ? next++ : index, kind); ++p;
+    }
+    std::vector<uint64_t> slots;
+    for (auto kind : kinds) {
+        if (!kind) unsupported("CoreFoundation positional argument gap");
+        if (kind == 'f') { double value = args.floating(); uint64_t bits; std::memcpy(&bits, &value, 8); slots.push_back(bits); }
+        else slots.push_back(args.integer());
+    }
+    return slots;
+}
+CFStringRef cfCreate(CFAllocatorRef allocator, CFDictionaryRef options, CFStringRef source, const Arguments* args) {
+    auto slots = cfArguments(source, *args);
+    return CFStringCreateWithFormatAndArguments(allocator, options, source, reinterpret_cast<va_list>(slots.data()));
+}
+void cfAppend(CFMutableStringRef target, CFDictionaryRef options, CFStringRef source, const Arguments* args) {
+    auto slots = cfArguments(source, *args);
+    CFStringAppendFormatAndArguments(target, options, source, reinterpret_cast<va_list>(slots.data()));
 }
 } // namespace
 
-extern "C" int guestFormatDispatch(uint64_t* registers, const unsigned char* vectors, const unsigned char* stack, unsigned mode) {
-    constexpr unsigned named = 3;
+extern "C" uintptr_t guestFormatDispatch(uint64_t* registers, const unsigned char* vectors, const unsigned char* stack, unsigned mode) {
+    if ((mode == 1 || mode == 4) && !logging_enabled) return 0;
+    unsigned named = mode == 4 ? 2 : 3;
     Arguments args{stack, reinterpret_cast<unsigned char*>(registers + 8), vectors + 128, -int((8 - named) * 8), -128};
+    if (mode == 2) return reinterpret_cast<uintptr_t>(cfCreate(reinterpret_cast<CFAllocatorRef>(registers[0]), reinterpret_cast<CFDictionaryRef>(registers[1]), reinterpret_cast<CFStringRef>(registers[2]), &args));
+    if (mode == 3) { cfAppend(reinterpret_cast<CFMutableStringRef>(registers[0]), reinterpret_cast<CFDictionaryRef>(registers[1]), reinterpret_cast<CFStringRef>(registers[2]), &args); return 0; }
+    if (mode == 4) {
+        auto source = reinterpret_cast<CFStringRef>(registers[1]);
+        auto message = cfCreate(nullptr, nullptr, source, &args);
+        auto log = reinterpret_cast<void (*)(int64_t, CFStringRef, ...)>(dlsym(RTLD_DEFAULT, "CFLog"));
+        if (!log) unsupported("native CFLog unavailable");
+        log(static_cast<int64_t>(registers[0]), CFSTR("%@"), message);
+        if (message) CFRelease(message); return 0;
+    }
     auto text = format(reinterpret_cast<const char*>(registers[2]), args);
     if (mode == 1) return logWrite(static_cast<int>(registers[0]), reinterpret_cast<const char*>(registers[1]), text.c_str());
     return copyFormat(reinterpret_cast<char*>(registers[0]), registers[1], text);
 }
+void setGuestLogging(bool enabled) { logging_enabled = enabled; }
 extern "C" void guestSnprintf();
 extern "C" void guestLogPrint();
+extern "C" void guestCFCreateFormat();
+extern "C" void guestCFAppendFormat();
+extern "C" void guestCFLog();
 Bridge formatBridge(const std::string& name) {
     if (name == "snprintf") return {reinterpret_cast<void*>(&guestSnprintf), false, false};
     if (name == "vsnprintf") return {reinterpret_cast<void*>(&vsnprintfBridge), false, false};
     if (name == "__android_log_print") return {reinterpret_cast<void*>(&guestLogPrint), false, false};
     if (name == "__android_log_write") return {reinterpret_cast<void*>(&logWrite), false, false};
     if (name == "__android_log_vprint") return {reinterpret_cast<void*>(&logVprint), false, false};
+    if (name == "CFStringCreateWithFormat") return {reinterpret_cast<void*>(&guestCFCreateFormat), false, false};
+    if (name == "CFStringAppendFormat") return {reinterpret_cast<void*>(&guestCFAppendFormat), false, false};
+    if (name == "CFStringCreateWithFormatAndArguments") return {reinterpret_cast<void*>(&cfCreate), false, false};
+    if (name == "CFStringAppendFormatAndArguments") return {reinterpret_cast<void*>(&cfAppend), false, false};
+    if (name == "CFLog") return {reinterpret_cast<void*>(&guestCFLog), false, false};
     return {};
 }
 } // namespace native_poc

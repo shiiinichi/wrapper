@@ -131,6 +131,32 @@ format_probe:
 .Lformat: .asciz "%d %lld %x %.3s %c %.2f %zu %*.*s %g %g %g %g %g %g %g %g"
 .Lstring: .asciz "abcdef"
 .p2align 2
+.global cf_format_probe
+.type cf_format_probe, %function
+cf_format_probe:
+    sub sp, sp, #64
+    stp x29, x30, [sp, #48]
+    mov x16, x0
+    mov x0, x1
+    mov x1, #0
+    mov x4, #42
+    mov x5, #0x5678
+    movk x5, #0x1234, lsl #16
+    adr x6, .Lstring
+    mov x7, #87
+    fmov d0, #3.25
+    str x5, [sp]
+    mov x9, #6
+    str x9, [sp, #8]
+    mov x9, #3
+    str x9, [sp, #16]
+    adr x9, .Lstring
+    str x9, [sp, #24]
+    blr x16
+    ldp x29, x30, [sp, #48]
+    add sp, sp, #64
+    ret
+.size cf_format_probe, .-cf_format_probe
 """)
     subprocess.run(["xcrun", "clang", "--target=aarch64-linux-android22", "-c", str(source),
                     "-o", str(object_file)], check=True, capture_output=True)
@@ -157,7 +183,7 @@ format_probe:
     for offset in range(symbol_section[4], symbol_section[4] + symbol_section[5], 24):
         name, info, _, _, value, size = struct.unpack_from("<IBBHQQ", obj, offset)
         label = names[name:names.index(0, name)].decode()
-        if label in ("tls_probe", "sret_probe", "format_probe"):
+        if label in ("tls_probe", "sret_probe", "format_probe", "cf_format_probe"):
             exports.append((label, value, size))
     strings = b"\0" + b"".join(label.encode() + b"\0" for label, _, _ in exports)
     data[0x2020:0x2020 + len(strings)] = strings

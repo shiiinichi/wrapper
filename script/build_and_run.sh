@@ -11,8 +11,8 @@ if [[ "$(uname -s)" != Darwin || "$(uname -m)" != arm64 ]]; then
   exit 2
 fi
 case "$MODE" in
-  run|--verify|verify|--debug|debug|--logs|logs|--telemetry|telemetry) ;;
-  *) echo "usage: $0 [run|--verify|--debug|--logs|--telemetry]" >&2; exit 2 ;;
+  run|--verify|verify|--debug|debug|--logs|logs|--telemetry|telemetry|--login|login) ;;
+  *) echo "usage: $0 [run|--verify|--debug|--logs|--telemetry|--login]" >&2; exit 2 ;;
 esac
 
 # The executable exists only as isolated probes. Stop an earlier invocation of
@@ -28,12 +28,19 @@ xcrun clang++ -arch arm64 -std=c++17 -O1 -g -Wall -Wextra -Werror \
   "$ROOT_DIR/native/macos/abi_runtime.cpp" \
   "$ROOT_DIR/native/macos/abi_selftest.cpp" \
   "$ROOT_DIR/native/macos/services.cpp" \
+  "$ROOT_DIR/native/macos/authentication.cpp" \
+  "$ROOT_DIR/native/macos/auth_input.cpp" \
   "$ROOT_DIR/native/macos/format_bridge.cpp" \
   "$ROOT_DIR/native/macos/posix_bridge.cpp" \
+  "$ROOT_DIR/native/macos/network_bridge.cpp" \
+  "$ROOT_DIR/native/macos/sqlite_bridge.cpp" \
   "$ROOT_DIR/native/macos/guest_call.S" \
-  -o "$APP_BINARY"
+  -lcurl -lsqlite3 -framework CoreFoundation -o "$APP_BINARY"
 
 case "$MODE" in
+  --login|login)
+    exec python3 "$ROOT_DIR/native/macos/sign_in.py" --binary "$APP_BINARY" --assets "$BUILD_DIR/assets"
+    ;;
   --debug|debug)
     exec xcrun lldb -- "$APP_BINARY" --assets "$BUILD_DIR/assets" --apple-profile --initialize libandroidappmusic.so
     ;;

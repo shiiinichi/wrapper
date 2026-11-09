@@ -2,6 +2,7 @@
 #include "format_bridge.h"
 #include "elf_loader.h"
 #include "posix_bridge.h"
+#include "network_bridge.h"
 #include <array>
 #include <cerrno>
 #include <cstdio>
@@ -313,6 +314,7 @@ int linuxError(int value) { return linuxErrorInternal(value); }
 Bridge runtimeBridge(const std::string& name) {
     if (auto formatted = formatBridge(name); formatted.address) return formatted;
     if (auto posix = posixBridge(name); posix.address) return posix;
+    if (auto network = networkBridge(name); network.address) return network;
 #define BRIDGE(symbol, function) if (name == symbol) return {reinterpret_cast<void*>(&function), false, false}
     BRIDGE("fopen", fopenBridge); BRIDGE("fclose", fcloseBridge); BRIDGE("fread", freadBridge); BRIDGE("fwrite", fwriteBridge);
     BRIDGE("getc", getcBridge); BRIDGE("ungetc", ungetcBridge); BRIDGE("fputc", fputcBridge); BRIDGE("fflush", fflushBridge);

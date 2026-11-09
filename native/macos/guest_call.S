@@ -25,6 +25,18 @@ _guestSnprintf:
 .globl _guestLogPrint
 _guestLogPrint:
     mov w9, #1
+    b LformatCapture
+.globl _guestCFCreateFormat
+_guestCFCreateFormat:
+    mov w9, #2
+    b LformatCapture
+.globl _guestCFAppendFormat
+_guestCFAppendFormat:
+    mov w9, #3
+    b LformatCapture
+.globl _guestCFLog
+_guestCFLog:
+    mov w9, #4
 LformatCapture:
     sub sp, sp, #224
     stp x29, x30, [sp, #208]

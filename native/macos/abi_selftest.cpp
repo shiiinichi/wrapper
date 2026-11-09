@@ -12,6 +12,9 @@
 #include <filesystem>
 #include <unistd.h>
 #include <pthread.h>
+#include <fstream>
+#include <curl/curl.h>
+#include <CoreFoundation/CoreFoundation.h>
 
 namespace native_poc {
 namespace {
@@ -26,6 +29,9 @@ void onceCallback() { ++once_calls; }
 struct OnceTest { void* key; int (*once)(void*, void (*)()); int result = -1; };
 void* onceThread(void* pointer) {
     auto* test = static_cast<OnceTest*>(pointer); test->result = test->once(test->key, onceCallback); return pointer;
+}
+size_t curlWrite(char* bytes, size_t size, size_t count, void* context) {
+    static_cast<std::string*>(context)->append(bytes, size * count); return size * count;
 }
 }
 
@@ -180,11 +186,70 @@ std::string probeServiceAbi(Loader& loader, const std::string& assets) {
     check(get_time(time.data(), nullptr) == 0 && time[0] > 0 && time[1] >= 0 && time[1] < 1000000 && time[2] == 0x123456789, "Android timeval layout changed");
     auto config = bridge<long (*)(int)>("sysconf");
     check(config(0x27) == getpagesize() && config(0x7fffffff) == -1 && guestErrno() == 22, "Android sysconf names were not translated");
+    auto mask = bridge<unsigned (*)(unsigned)>("umask");
+    unsigned previous_mask = mask(0077); unsigned observed_mask = mask(previous_mask);
+    check(observed_mask == 0077, "Android umask did not preserve and restore the process mask");
     auto sha1 = bridge<unsigned char* (*)(const void*, size_t, unsigned char*)>("SHA1");
     std::array<unsigned char, 20> hash{};
     const unsigned char digest[] = {0xa9,0x99,0x3e,0x36,0x47,0x06,0x81,0x6a,0xba,0x3e,0x25,0x71,0x78,0x50,0xc2,0x6c,0x9c,0xd0,0xd8,0x9d};
     check(sha1("abc", 3, hash.data()) == hash.data() && std::memcmp(hash.data(), digest, 20) == 0, "SHA1 adapter changed the standard digest");
     return "{\"indirect_return\":true,\"guest_variadic_format\":true,\"elf_dynamic_lookup\":true,\"android_file_stat\":true,"
         "\"isolated_writes\":true,\"time_sysconf\":true,\"sha1\":true}";
+}
+std::string probeNetworkAbi(const std::string& assets) {
+    auto option = bridge<int (*)(CURL*, int, uintptr_t)>("curl_easy_setopt");
+    auto info = bridge<int (*)(CURL*, int, void*)>("curl_easy_getinfo");
+    auto share_option = bridge<int (*)(CURLSH*, int, uintptr_t)>("curl_share_setopt");
+    auto multi_option = bridge<int (*)(CURLM*, int, uintptr_t)>("curl_multi_setopt");
+    CURL* easy = curl_easy_init(); CURLSH* share = curl_share_init(); CURLM* multi = curl_multi_init();
+    check(easy && share && multi, "native curl handles were not created");
+    check(share_option(share, CURLSHOPT_SHARE, CURL_LOCK_DATA_DNS) == 0 && multi_option(multi, CURLMOPT_MAXCONNECTS, 2) == 0, "curl share/multi variadic translation failed");
+    std::ifstream input(assets + "/network-test-url"); std::string url; std::getline(input, url);
+    bool negative_tls = !url.empty();
+    if (!negative_tls) url = "file://" + assets + "/transfer.txt";
+    std::string body;
+    check(option(easy, CURLOPT_URL, reinterpret_cast<uintptr_t>(url.c_str())) == 0 &&
+        option(easy, CURLOPT_WRITEDATA, reinterpret_cast<uintptr_t>(&body)) == 0 &&
+        option(easy, CURLOPT_WRITEFUNCTION, reinterpret_cast<uintptr_t>(&curlWrite)) == 0 &&
+        option(easy, CURLOPT_TIMEOUT_MS, 3000) == 0 && option(easy, CURLOPT_PROXY, reinterpret_cast<uintptr_t>("")) == 0,
+        "curl pointer/scalar/function variadic translation failed");
+    check(option(easy, CURLOPT_SSL_VERIFYPEER, 0) == 0 && option(easy, CURLOPT_SSL_VERIFYHOST, 0) == 0, "curl TLS policy setup failed");
+    auto perform = bridge<int (*)(CURL*)>("curl_easy_perform"); int code = perform(easy);
+    if (negative_tls) check(code == CURLE_PEER_FAILED_VERIFICATION, "untrusted TLS certificate was accepted or failed for an unrelated reason");
+    else check(code == 0 && body == "native-curl-typed-transfer\n", "native curl callback changed response bytes");
+    long status = -1; double duration = -1; char* effective = nullptr;
+    check(info(easy, CURLINFO_RESPONSE_CODE, &status) == 0 && info(easy, CURLINFO_TOTAL_TIME, &duration) == 0 && duration >= 0 &&
+        info(easy, CURLINFO_EFFECTIVE_URL, &effective) == 0 && effective && url == effective, "curl typed getinfo outputs changed");
+    curl_easy_cleanup(easy); curl_share_cleanup(share); curl_multi_cleanup(multi);
+    return "{\"curl_typed_options\":true,\"curl_typed_info\":true,\"untrusted_tls_rejected\":" + std::string(negative_tls ? "true" : "false") + "}";
+}
+std::string probeCoreFoundationAbi(Loader& loader) {
+    loader.load("tls-fixture.so"); loader.relocate(); loader.prepareExecution(); loader.initialize();
+    auto call = reinterpret_cast<uintptr_t (*)(void*, void*, CFStringRef, CFStringRef)>(loader.symbol("tls-fixture.so", "cf_format_probe"));
+    auto text = [](CFStringRef string) {
+        std::array<char, 512> bytes{};
+        check(string && CFStringGetCString(string, bytes.data(), bytes.size(), kCFStringEncodingUTF8), "CoreFoundation returned invalid text");
+        return std::string(bytes.data());
+    };
+    auto result = reinterpret_cast<CFStringRef>(call(runtimeBridge("CFStringCreateWithFormat").address, nullptr,
+        CFSTR("%@ %d %llu %.3s %c %.2f %zu %*.*s"), CFSTR("object")));
+    check(text(result) == "object 42 305419896 abc W 3.25 305419896    abc", "CoreFoundation creation lost GP/FP/overflow arguments");
+    CFRelease(result);
+    auto target = CFStringCreateMutable(nullptr, 0);
+    call(runtimeBridge("CFStringAppendFormat").address, target,
+        CFSTR("%2$d %1$@ %6$.2f %3$llu %4$.3s %5$c %7$zu %10$*8$.*9$s"), CFSTR("object"));
+    check(text(target) == "42 object 3.25 305419896 abc W 305419896    abc", "CoreFoundation positional formatting changed argument order");
+    struct Arguments { void* stack; void* general_top; void* vector_top; int general_offset, vector_offset; };
+    std::array<uint64_t, 2> general{reinterpret_cast<uintptr_t>(CFSTR("object")), 42};
+    alignas(16) std::array<unsigned char, 16> vectors{}; double number = 3.25; std::memcpy(vectors.data(), &number, 8);
+    std::array<uint64_t, 1> overflow{};
+    Arguments arguments{overflow.data(), general.data() + 2, vectors.data() + 16, -16, -16};
+    auto create = bridge<CFStringRef (*)(CFAllocatorRef, CFDictionaryRef, CFStringRef, const void*)>("CFStringCreateWithFormatAndArguments");
+    result = create(nullptr, nullptr, CFSTR("%@ %d %.2f"), &arguments);
+    check(text(result) == "object 42 3.25", "CoreFoundation Android va_list creation failed"); CFRelease(result);
+    CFStringReplaceAll(target, CFSTR("prefix "));
+    bridge<void (*)(CFMutableStringRef, CFDictionaryRef, CFStringRef, const void*)>("CFStringAppendFormatAndArguments")(target, nullptr, CFSTR("%@ %d %.2f"), &arguments);
+    check(text(target) == "prefix object 42 3.25", "CoreFoundation Android va_list append failed"); CFRelease(target);
+    return "{\"cf_create_format\":true,\"cf_append_format\":true,\"cf_positional_arguments\":true,\"cf_guest_va_list\":true}";
 }
 }

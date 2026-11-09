@@ -1,6 +1,7 @@
 #include "elf_loader.h"
 #include "shims.h"
 #include "abi_runtime.h"
+#include "sqlite_bridge.h"
 #include <dlfcn.h>
 
 #include <algorithm>
@@ -498,6 +499,13 @@ uintptr_t Loader::resolve(Image& image, const Symbol& symbol, const std::string&
         issues_.push_back({image.report.library, "symbol_type", name + ": TLS/IFUNC is unsupported"});
         return 0;
     }
+    if (apple_profile_) {
+        auto database = sqliteBridge(name, type == 1);
+        if (database.address) {
+            if (database.guarded) image.report.guarded_symbols.insert(name);
+            return reinterpret_cast<uintptr_t>(database.address);
+        }
+    }
     if (symbol.section) return symbol.section == 0xfff1 ? symbol.value : image.bias_ + symbol.value;
     for (const auto& candidate : images_) {
         if (candidate->report.data_only && (type != 1 || name.rfind("SL_IID_", 0) != 0)) continue;
@@ -687,6 +695,7 @@ std::string loaderReport(const Loader& loader) {
         << ",\"mixed_pages_readonly\":false"
         << ",\"apple_host_profile\":" << (loader.appleProfile() ? "true" : "false")
         << ",\"guest_destructors_registered\":" << guestDestructorCount()
+        << ",\"native_sqlite_opened\":" << nativeSqliteOpenCount()
         << ",\"native_host_libraries\":";
     stringArray(out, loader.nativeHostModules());
     out

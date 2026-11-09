@@ -66,6 +66,7 @@ int unlinkBridge(const char* path) { if (!writablePath(path)) { guestErrno() = 1
 int renameBridge(const char* old, const char* path) { if (!writablePath(old) || !writablePath(path)) { guestErrno() = 13; return -1; } return result(::rename(old, path)); }
 int fsyncBridge(int fd) { return result(::fsync(fd)); }
 int accessBridge(const char* path, int mode) { return result(::access(path, mode)); }
+unsigned umaskBridge(unsigned mask) { return ::umask(static_cast<mode_t>(mask & 0777)); }
 int flockBridge(int fd, int operation) { return result(::flock(fd, operation)); }
 
 struct GuestStat {
@@ -209,6 +210,7 @@ Bridge posixBridge(const std::string& name) {
     BRIDGE("unlink", unlinkBridge); BRIDGE("rename", renameBridge); BRIDGE("fsync", fsyncBridge); BRIDGE("fdatasync", fsyncBridge);
     BRIDGE("stat", statBridge); BRIDGE("stat64", statBridge); BRIDGE("lstat", lstatBridge); BRIDGE("lstat64", lstatBridge);
     BRIDGE("fstat", fstatBridge); BRIDGE("fstat64", fstatBridge); BRIDGE("fcntl", fcntlBridge); BRIDGE("flock", flockBridge); BRIDGE("access", accessBridge);
+    BRIDGE("umask", umaskBridge);
     BRIDGE("gettimeofday", gettimeofdayBridge); BRIDGE("clock_gettime", clockBridge); BRIDGE("nanosleep", nanosleepBridge);
     BRIDGE("socket", socketBridge); BRIDGE("ioctl", ioctlBridge);
     BRIDGE("sysconf", sysconfBridge); BRIDGE("getcwd", getcwdBridge); BRIDGE("mmap", mmapBridge); BRIDGE("mmap64", mmapBridge); BRIDGE("munmap", munmapBridge);

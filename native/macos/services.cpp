@@ -14,15 +14,8 @@ namespace native_poc {
 namespace {
 constexpr const char* music = "libandroidappmusic.so";
 constexpr const char* store = "libstoreservicescore.so";
-struct Shared { void* object = nullptr; void* control = nullptr; };
-// Borrowed const-reference view of the pinned NDK libc++ long-string layout.
-// Guest code copies it; it must never destroy this borrowed representation.
-struct String {
-    size_t capacity = 1, size;
-    const char* data;
-    explicit String(const char* text) : size(std::strlen(text)), data(text) {}
-};
-static_assert(sizeof(String) == 24 && sizeof(Shared) == 16);
+using Shared = GuestShared;
+using String = GuestString;
 void stage(const char* name) { std::fprintf(stderr, "native-poc: bootstrap %s\n", name); }
 void require(bool condition, const char* message) { if (!condition) throw std::runtime_error(message); }
 void* entry(Loader& loader, const char* library, const char* name) {
@@ -62,7 +55,7 @@ std::string stringValue(const void* object) {
 }
 } // namespace
 
-std::string probeServices(Loader& loader, const std::string& data_directory) {
+Services initializeServices(Loader& loader, const std::string& data_directory, const std::string& device_identity) {
     require(!data_directory.empty(), "service bootstrap requires --data-dir");
     std::filesystem::create_directories(data_directory);
     auto base = std::filesystem::canonical(data_directory).string();
@@ -75,8 +68,9 @@ std::string probeServices(Loader& loader, const std::string& data_directory) {
     loader.initialize();
 
     stage("device-config");
-    // Fixed identity belongs only to this disposable proof-of-concept profile.
-    String identity("a1368dcb4907e25f"), empty("");
+    // Bootstrap probes use a fixed identifier; authentication supplies a
+    // separate randomly generated identifier persisted in its own profile.
+    String identity(device_identity.c_str()), empty("");
     fn<void (*)(const String*)>(loader, music,
         "_ZN14FootHillConfig6configERKNSt6__ndk112basic_stringIcNS0_11char_traitsIcEENS0_9allocatorIcEEEE")(&identity);
     Shared guid;
@@ -164,8 +158,10 @@ std::string probeServices(Loader& loader, const std::string& data_directory) {
     bool refresh = false;
     fn<void (*)(void*, const bool*)>(loader, music, "_ZN22SVPlaybackLeaseManager25refreshLeaseAutomaticallyERKb")(lease.data(), &refresh);
     stage("services-ready");
-    return "{\"device_configured\":true,\"request_context_initialized\":true,\"context_round_trip\":true,"
+    std::string evidence = "{\"device_configured\":true,\"request_context_initialized\":true,\"context_round_trip\":true,"
         "\"presentation_interface\":true,\"fairplay_service\":true,\"foothill_controller\":true,\"lease_session\":true,"
         "\"automatic_lease_refresh\":false,\"lease_requested\":false,\"authenticated\":false,\"process_owned_lifetime\":true}";
+    return {context, presentation, evidence};
 }
+std::string probeServices(Loader& loader, const std::string& directory) { return initializeServices(loader, directory).evidence; }
 } // namespace native_poc

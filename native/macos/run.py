@@ -44,7 +44,7 @@ def main() -> int:
         parser.error("run on native arm64 macOS; Rosetta/Linux/QEMU are not this experiment")
     manifest = json.loads((args.assets / "manifest.json").read_text())
     report = {"platform": platform.platform(), "asset_source_commit": manifest["source_commit"],
-              "native_probes": {}, "apple_initialization": {}, "service_bootstrap": {}, "apple_library_inspection": {}}
+              "native_probes": {}, "apple_initialization": {}, "service_bootstrap": {}, "authentication_preflight": {}, "apple_library_inspection": {}}
     for target in ["zlib", "blocks"]:
         result = invoke(args.binary, args.assets, "--probe", target)
         report["native_probes"][target] = result
@@ -72,6 +72,12 @@ def main() -> int:
         print("  " + json.dumps(result["result"]))
     if not result.get("ok"):
         print("  " + str(result.get("error", result.get("stderr", "bootstrap failed"))))
+    with tempfile.TemporaryDirectory(prefix="auth-preflight-", dir=args.report.parent) as directory:
+        result = invoke(args.binary, args.assets, "--probe", "auth-preflight", apple_profile=True, data_directory=directory)
+        report["authentication_preflight"] = result
+    print(f"Native authentication callback: {'PASS' if result.get('ok') else 'FAIL'}; cancelled before credentials are submitted")
+    if not result.get("ok"):
+        print("  " + str(result.get("error", result.get("stderr", "authentication preflight failed"))))
     baseline = ["libCoreADI.so", "libCoreLSKD.so", "libstoreservicescore.so", "libandroidappmusic.so"] if args.inspect_baseline else []
     for name in baseline:
         result = invoke(args.binary, args.assets, "--inspect", name)
@@ -87,7 +93,7 @@ def main() -> int:
     args.report.parent.mkdir(parents=True, exist_ok=True)
     args.report.write_text(json.dumps(report, indent=2) + "\n")
     print(f"Report: {args.report}")
-    results = [*report["native_probes"].values(), *report["apple_initialization"].values(), report["service_bootstrap"], *report["apple_library_inspection"].values()]
+    results = [*report["native_probes"].values(), *report["apple_initialization"].values(), report["service_bootstrap"], report["authentication_preflight"], *report["apple_library_inspection"].values()]
     return 0 if all(result.get("ok") and result.get("exit_code") == 0 for result in results) else 1
 
 
