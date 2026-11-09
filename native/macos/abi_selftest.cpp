@@ -147,6 +147,12 @@ std::string probeServiceAbi(Loader& loader, const std::string& assets) {
     callGuestReturn(sret, output.data(), reinterpret_cast<void*>(0x11), reinterpret_cast<void*>(0x22),
         reinterpret_cast<void*>(0x33), reinterpret_cast<void*>(0x44), reinterpret_cast<void*>(0x55), reinterpret_cast<void*>(0x66));
     check(output == std::array<uintptr_t, 6>{0x11, 0x22, 0x33, 0x44, 0x55, 0x66}, "ARM64 indirect return moved named arguments");
+    std::array<uintptr_t, 9> extended{};
+    const void* arguments[] = {reinterpret_cast<void*>(1), reinterpret_cast<void*>(2), reinterpret_cast<void*>(3),
+        reinterpret_cast<void*>(4), reinterpret_cast<void*>(5), reinterpret_cast<void*>(6),
+        reinterpret_cast<void*>(7), reinterpret_cast<void*>(8), reinterpret_cast<void*>(9)};
+    callGuestReturn9(loader.symbol("tls-fixture.so", "sret9_probe"), extended.data(), arguments);
+    check(extended == std::array<uintptr_t, 9>{1,2,3,4,5,6,7,8,9}, "ARM64 ninth argument collided with the indirect result");
     std::array<char, 256> text{};
     auto formatter = reinterpret_cast<int (*)(void*, char*)>(loader.symbol("tls-fixture.so", "format_probe"));
     int length = formatter(runtimeBridge("snprintf").address, text.data());
@@ -184,6 +190,10 @@ std::string probeServiceAbi(Loader& loader, const std::string& assets) {
     auto get_time = bridge<int (*)(void*, void*)>("gettimeofday");
     std::array<int64_t, 3> time{0, 0, 0x123456789};
     check(get_time(time.data(), nullptr) == 0 && time[0] > 0 && time[1] >= 0 && time[1] < 1000000 && time[2] == 0x123456789, "Android timeval layout changed");
+    std::array<uint64_t, 31> registers{};
+    registers[0] = reinterpret_cast<uintptr_t>(time.data()); registers[8] = 169; registers[23] = 0x123456789;
+    guestInlineTimeSyscall(registers.data());
+    check(registers[0] == 0 && registers[8] == 169 && registers[23] == 0x123456789 && time[0] > 0 && time[1] < 1000000 && time[2] == 0x123456789, "inline timeval syscall changed saved registers or layout");
     auto config = bridge<long (*)(int)>("sysconf");
     check(config(0x27) == getpagesize() && config(0x7fffffff) == -1 && guestErrno() == 22, "Android sysconf names were not translated");
     auto mask = bridge<unsigned (*)(unsigned)>("umask");

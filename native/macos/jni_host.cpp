@@ -35,7 +35,7 @@ void rawHex(uintptr_t value) {
 void fault(int signal, siginfo_t* info, void* context) {
     auto* state = static_cast<ucontext_t*>(context);
     uintptr_t pc = state->uc_mcontext->__ss.__pc;
-    raw("native-poc: memory fault pc="); rawHex(pc);
+    raw(signal == SIGSYS ? "native-poc: guest syscall trap pc=" : "native-poc: memory fault pc="); rawHex(pc);
     raw(" address="); rawHex(reinterpret_cast<uintptr_t>(info->si_addr));
     raw(" lr="); rawHex(state->uc_mcontext->__ss.__lr);
     raw(" x0="); rawHex(state->uc_mcontext->__ss.__x[0]);
@@ -78,6 +78,7 @@ void installCrashDiagnostics(Loader& loader) {
     action.sa_flags = SA_SIGINFO;
     sigemptyset(&action.sa_mask);
     sigaction(SIGSEGV, &action, nullptr); sigaction(SIGBUS, &action, nullptr);
+    sigaction(SIGSYS, &action, nullptr);
 }
 
 std::string probeAppleJni(Loader& loader, const std::string& library) {

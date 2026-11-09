@@ -161,7 +161,7 @@ Services initializeServices(Loader& loader, const std::string& data_directory, c
     std::string evidence = "{\"device_configured\":true,\"request_context_initialized\":true,\"context_round_trip\":true,"
         "\"presentation_interface\":true,\"fairplay_service\":true,\"foothill_controller\":true,\"lease_session\":true,"
         "\"automatic_lease_refresh\":false,\"lease_requested\":false,\"authenticated\":false,\"process_owned_lifetime\":true}";
-    return {context, presentation, evidence};
+    return {context, presentation, evidence, lease.data(), foothill};
 }
 std::string probeServices(Loader& loader, const std::string& directory) { return initializeServices(loader, directory).evidence; }
 } // namespace native_poc

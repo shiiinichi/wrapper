@@ -41,6 +41,7 @@ struct ImageReport {
     size_t constructors_called = 0;
     size_t mixed_pages_read_execute = 0;
     size_t tls_read_rewrites = 0;
+    size_t inline_syscalls_adapted = 0;
     size_t tls_adapter_bytes = 0;
     size_t data_only_relocations_skipped = 0;
     bool data_only = false;

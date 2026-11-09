@@ -1,8 +1,9 @@
-# Native macOS ARM64 Apple Music authentication experiment
+# Native macOS ARM64 desktop app and HTTP API
 
 This experiment executes the actual Android ARM64 Apple Music initializers and
-service bootstrap and authentication callbacks in a native arm64 macOS process. It uses no
-QEMU, Linux VM, APK runtime, or Rosetta. The original HTTP wrapper remains separate.
+service bootstrap, authentication, and API operations in a native arm64 macOS
+process. A SwiftUI desktop app manages the local server. It uses no Docker,
+QEMU, Linux VM, APK runtime, or Rosetta. The original Linux wrapper remains separate.
 
 The original `WorldObservationLog/wrapper` `lite` baseline is
 `e51e370a6b0660ed9d722fff1add079098aeb935`. The pinned ARM64 binary source is
@@ -15,20 +16,105 @@ ARM64 Git history. No additional packages are required.
 
 ```sh
 ./script/build_and_run.sh
+./script/build_and_run.sh --serve
 ./script/build_and_run.sh --verify
+./script/build_and_run.sh --probes
 ./script/build_and_run.sh --debug
 ./script/build_and_run.sh --login
 ```
 
-The Run action builds the Mach-O executable, extracts only pinned library
-blobs, and runs isolated execution, initialization, and service probes. Each child
-has a 15-second timeout and core dumps disabled. Debug mode opens the actual
+The default Run action builds and opens
+`build/native-poc/Native Music Wrapper.app`. The desktop app starts its own native
+API at `http://127.0.0.1:12341`, shows saved-account status, offers masked sign-in,
+and checks a supplied track ID. Closing the app stops its server and active
+workers. The server watches its owning app process; it also stops if that process
+is terminated. Signing in temporarily stops the server to avoid concurrent use
+of the account profile.
+
+`--serve --port 12341` runs the same server without the GUI. `--app-build` builds
+the app without launching it. The bundle contains the native executable, Python
+server modules, and pinned library blobs; account data stays outside the bundle.
+The development launch reuses `build/native-poc/auth-profile`. A direct Finder
+launch remembers that profile; a new installation defaults to Application Support.
+
+`--probes` runs the earlier isolated execution, initialization, and service probes.
+Each probe child has a 15-second timeout and core dumps disabled. Debug mode opens the actual
 `libandroidappmusic.so` initialization path in LLDB.
 
 Assets, SHA-256/Git-blob provenance (`manifest.json`), binaries, and evidence
 (`report.json`) stay under ignored `build/native-poc/`. The default service probe
 uses a fresh temporary directory there and removes it afterward. No existing
 wrapper account data is copied.
+
+## Local HTTP API
+
+The server binds to loopback and uses the original JSON envelope:
+
+```json
+{"code":0,"msg":"SUCCESS","data":{}}
+```
+
+Like lite, errors use a nonzero JSON `code` with HTTP status 200. Responses carry
+`X-Wrapper-Backend: native-macos-arm64` so clients can identify this implementation.
+The desktop also verifies a per-server instance identifier before reporting ready.
+
+| Endpoint | Method | Parameters and behavior |
+| --- | --- | --- |
+| `/status` | GET | Native saved-account presence, storefront regions, and backend identity. |
+| `/m3u8` | GET | `adamId`; enhanced HLS from Apple's catalog using native-issued account tokens. |
+| `/key` | GET | `adamId`, `uri`; requests the native FairPlay persistent key. See the context limitation below. |
+| `/lyrics` | GET | `adamId`; optional `language`, `syllable`, and `script`; preserves TTML localizations. |
+| `/webplayback` | GET | `adamId`; Apple web playback playlist using native-issued account tokens. |
+| `/license` | POST | JSON `adamId`, `challenge`, `uri`, optional `drm-type` (`wv` or `pr`). Requires a real player/CDM challenge. |
+
+The server uses bounded native child processes and serializes access to each
+profile. A child failure or timeout returns a JSON error while the HTTP process
+stays available. Tokens stay in process memory; request logs omit query strings,
+challenge bodies, tokens, keys, signed URLs, and lyric content. The server never
+forwards requests to the Docker service. Browser-origin requests and foreign Host
+headers are rejected; this development API is intended for local application clients.
+
+**Native `/key` does not provide a Temari playback template.** Its `contentKey`
+is the actual ARM64 library's persistent-key result. The x86 `ctx`, `state`, and
+register snapshots from the Linux service cannot be reused as ARM64 snapshots.
+The native response explicitly reports `temariCompatible:false`; `/status`
+reports `temari_compatible:false`. The desktop marks a successful key request as
+limited, and does not claim sample decryption or audio playback. Existing Temari
+clients still need the original backend for sample processing.
+
+The desktop shows endpoint summaries without displaying keys, tokens, signed
+manifest URLs, or lyric text. Its license row explains why a DRM challenge is
+needed instead of inventing a successful license response.
+
+Every response carries an `app;dur=...` `Server-Timing` measurement. Sanitized
+timestamp/endpoint/method/result-code/server-milliseconds records append to
+`auth-profile/http-timings.jsonl` with mode `0600`. The desktop's Response column
+measures the client round trip for each API call, separately from subsequent
+playlist validation. Copy Summary includes these measurements; Show Timings
+reveals the private file. Timings include cold token acquisition when needed.
+
+## Token lifecycle
+
+The native library reloads account/session state from the private profile. The
+first web API request obtains an Android developer token through the native
+signed `apiToken` request, then exchanges that assertion for a music user token
+through native `createMusicToken`. Both results are cached in the server's RAM
+for 30 minutes and fetched again on the next request after that interval.
+
+The AMPWebPlay developer JWT is read from Apple's web application assets and
+cached in RAM for 24 hours. Web requests prefer this JWT; HLS, lyrics, and
+WebPlayback can fall back to the native developer token. License requests require
+the web JWT. A native `/key` request uses the library's FairPlay account state
+directly and does not use the server's web-token cache.
+
+These intervals are cache policies, not Apple's token expiration times. There
+is currently no JWT-expiry scheduling, background refresh, or invalidate/refresh/
+retry after an upstream 401/403. Stopping the server discards the RAM caches but
+does not sign out or revoke the saved account. Sign In Again stops the server,
+runs native authentication, and restarts it with empty caches. Account presence
+in `/status` is not a credential-validity check. The app does not implement
+Keychain storage or its own refresh-token protocol; persistent session handling
+belongs to the native library.
 
 ## Native sign-in and verification
 
@@ -46,7 +132,7 @@ and failed sign-ins return nonzero, with `authenticated:false`. Successful sign-
 requires response type 6, a positive account identifier, and a usable context
 account. Diagnostic reports stay in the ignored profile with mode `0600`.
 
-The default Run action performs a fresh, noninteractive authentication preflight:
+`--probes` performs a fresh, noninteractive authentication preflight:
 it runs the real AuthenticateFlow and returns a real cancellation response at
 the credential callback. It never asks for or submits account credentials.
 The callback implementation uses separate full-length password/code strings,
@@ -89,8 +175,8 @@ verification-code and protocol-dialog requests. The verification-code callback
 was exercised in an earlier live attempt, but a complete fresh 2FA sign-in in a
 single process still needs independent confirmation. Protocol-dialog payload
 parsing and callback wiring are tested; the successful run did not require a
-protocol-dialog interaction. Authenticated manifest/key requests and playback
-have not been tested yet.
+protocol-dialog interaction. API validation is separate from this sign-in
+milestone; saved-account presence alone does not establish token validity or playback.
 
 ## Verified bootstrap milestone
 
@@ -118,8 +204,8 @@ Blocks-to-macOS callback tests also remain.
 **The default service probe is bootstrap before sign-in.** It does not read
 credentials, start authentication, or request a lease. Automatic lease refresh
 is disabled; the manager receives empty Android callbacks. Presentation callbacks
-stop unexpected credential/dialog interaction. Manifest/key retrieval, FairPlay
-decryption, HTTP endpoints, and playback remain future work. Creating
+stop unexpected credential/dialog interaction. Sample decryption and playback
+remain future work. Creating
 service objects does not prove those later operations work.
 
 To retain a separate probe profile between invocations:
@@ -166,6 +252,10 @@ The explicit `--apple-profile`:
   stat/flock/time structures, sysconf names, non-executable mmap, and the network
   interface queries used for device configuration. SHA-1 uses CommonCrypto.
   CoreADI file creation also has a typed process-local umask bridge.
+  CoreFP's verified inline `gettimeofday` syscalls use register-preserving
+  adapters at thirteen pinned call sites; expected instruction pairs are checked
+  before patching. No Linux syscall number is passed to the macOS kernel.
+  Checked reads enforce buffer capacity, and sleep uses the native ABI.
   Guest writes require a dedicated data directory; initializer-only probes have
   no writable guest directory.
 * Supports guest `dlopen`/`dlsym` only for already loaded ELF images/exports.
@@ -237,6 +327,31 @@ Android getters, and check stable/private device identity. Curl tests verify exa
 callback bytes and rejection of an untrusted local HTTPS certificate even when
 the guest requests verification off. `--verify` needs permission to bind localhost;
 the cancelled-login test also reaches the public network preflight when permitted.
+The HTTP suite checks backend identity, request validation, localhost-only
+access, child failures/timeouts, token redaction, and line-lyric localization.
+The indirect-return fixture includes a ninth stack argument, as used by the
+native FairPlay key operation.
+
+The development-Mac live run with `adamId=1552791761` passes native account status,
+enhanced HLS playlist validation, word/line TTML, WebPlayback playlist validation,
+and native FairPlay persistent-key retrieval. The desktop start/stop/restart and
+quit/relaunch flows were exercised; quitting releases the local server port.
+The key result remains Temari-incompatible and no audio is played. License input
+validation is covered; actual license issuance still needs a real CDM challenge.
+
+To record a new live endpoint report (including client and server times):
+
+```sh
+python3 native/macos/check_endpoints.py --adam-id 1552791761
+```
+
+This requires a running native server and a signed-in account. The checker refuses
+another backend and writes metadata only to the ignored
+`build/native-poc/endpoint-checks/native-http-report.json`. External playlist fetch
+times are recorded separately from API response times. The initial enhanced-HLS
+request observed in the desktop took 4–5 seconds with token acquisition; subsequent
+requests were below one second. These are observations on the development Mac,
+not fixed latency guarantees.
 
 Strict baseline diagnostics remain available:
 

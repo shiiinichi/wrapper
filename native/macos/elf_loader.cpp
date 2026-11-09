@@ -2,6 +2,7 @@
 #include "shims.h"
 #include "abi_runtime.h"
 #include "sqlite_bridge.h"
+#include "posix_bridge.h"
 #include <dlfcn.h>
 
 #include <algorithm>
@@ -42,6 +43,15 @@ constexpr int64_t kInitArray = 25, kInitArraySize = 27, kGnuHash = 0x6ffffef5;
 constexpr uint64_t kMaximumImage = 256ULL * 1024 * 1024;
 constexpr uint64_t kMaximumTotal = 512ULL * 1024 * 1024;
 constexpr size_t kMaximumSymbols = 1000000;
+
+bool inlineTimeSyscall(const std::string& library, uint64_t address) {
+    // Exact call sites in the pinned CoreFP image. Do not scan or rewrite its
+    // encrypted code/data tables as arbitrary instructions.
+    if (library != "libCoreFP.so") return false;
+    constexpr uint64_t sites[] = {0x4dc1d4, 0x513ab4, 0x539cbc, 0x53bd40, 0x54dda4, 0x5582b8,
+        0x562bd8, 0x580ea4, 0x597754, 0x5c0258, 0x5f41d8, 0x5f5be8, 0x5f6608};
+    return std::find(std::begin(sites), std::end(sites), address) != std::end(sites);
+}
 
 uint64_t add(uint64_t a, uint64_t b) {
     if (b > std::numeric_limits<uint64_t>::max() - a)
@@ -185,7 +195,7 @@ Image::Image(const std::filesystem::path& path, bool reserve_tls_adapters) {
                 if (s.type != 1 || !(s.flags & 4)) continue;
                 if (s.size % 4 || add(s.offset, s.size) > file_.size()) throw std::runtime_error("invalid code-section file range");
                 for (size_t n = 0; n < s.size; n += 4)
-                    if ((read<uint32_t>(file_.data() + s.offset + n) & 0xffffffe0U) == 0xd53bd040U) ++count;
+                    if ((read<uint32_t>(file_.data() + s.offset + n) & 0xffffffe0U) == 0xd53bd040U || inlineTimeSyscall(report.library, s.address + n)) ++count;
             }
             if (count > 20000) throw std::runtime_error("TLS adapter count exceeds limit");
             adapter_bytes = alignUp(count * 384, page_size_);
@@ -359,9 +369,12 @@ void Image::adaptThreadPointerReads() {
         for (uint64_t offset = 0; offset < section.size; offset += 4) {
             auto* location = const_cast<uint8_t*>(at(section.address + offset, 4));
             uint32_t instruction = read<uint32_t>(location);
-            if ((instruction & 0xffffffe0U) != 0xd53bd040U) continue; // MRS Xn, TPIDR_EL0
+            bool inline_time = inlineTimeSyscall(report.library, section.address + offset);
+            if (inline_time && (offset < 4 || instruction != 0xd4000001U || read<uint32_t>(location - 4) != (0xd2800008U | (169U << 5))))
+                throw std::runtime_error("pinned CoreFP inline syscall instructions changed");
+            if (!inline_time && (instruction & 0xffffffe0U) != 0xd53bd040U) continue; // MRS Xn, TPIDR_EL0
             unsigned destination = instruction & 31;
-            if (destination == 31) { uint32_t nop = 0xd503201f; std::memcpy(location, &nop, 4); continue; }
+            if (!inline_time && destination == 31) { uint32_t nop = 0xd503201f; std::memcpy(location, &nop, 4); continue; }
             std::vector<uint32_t> code;
             code.push_back(0xd10003ffU | (800U << 10)); // sub sp, sp, #800
             for (unsigned r = 0; r < 30; r += 2)
@@ -375,9 +388,10 @@ void Image::adaptThreadPointerReads() {
             code.push_back(0xf9000000U | (97U << 10) | (31 << 5) | 16);
             for (unsigned r = 0; r < 32; r += 2)
                 code.push_back(0xad000000U | (((256 + r * 16) / 16) << 15) | ((r + 1) << 10) | (31 << 5) | r);
+            if (inline_time) code.push_back(0x910003e0U); // mov x0,sp: saved guest registers
             size_t load_index = code.size(); code.push_back(0); // ldr x16, getter literal
             code.push_back(0xd63f0200U); // blr x16
-            code.push_back(0xf9000000U | (destination << 10) | (31 << 5)); // result into saved Xn
+            if (!inline_time) code.push_back(0xf9000000U | (destination << 10) | (31 << 5)); // result into saved Xn
             for (unsigned r = 0; r < 32; r += 2)
                 code.push_back(0xad400000U | (((256 + r * 16) / 16) << 15) | ((r + 1) << 10) | (31 << 5) | r);
             code.push_back(0xf9400000U | (96U << 10) | (31 << 5) | 16);
@@ -398,12 +412,14 @@ void Image::adaptThreadPointerReads() {
             auto* target = mapping_ + mapped_size_ + thunk_used_;
             code[load_index] = 0x58000010U | (uint32_t(literal_index - load_index) << 5);
             code[return_index] = branch(reinterpret_cast<uintptr_t>(target + return_index * 4), reinterpret_cast<uintptr_t>(location + 4));
-            uintptr_t getter = reinterpret_cast<uintptr_t>(&guestThreadPointer);
+            uintptr_t getter = inline_time ? reinterpret_cast<uintptr_t>(&guestInlineTimeSyscall) : reinterpret_cast<uintptr_t>(&guestThreadPointer);
             std::memcpy(code.data() + literal_index, &getter, 8);
             std::memcpy(target, code.data(), bytes);
             uint32_t replacement = branch(reinterpret_cast<uintptr_t>(location), reinterpret_cast<uintptr_t>(target));
             std::memcpy(location, &replacement, 4);
-            thunk_used_ += bytes; ++report.tls_read_rewrites;
+            thunk_used_ += bytes;
+            if (inline_time) ++report.inline_syscalls_adapted;
+            else ++report.tls_read_rewrites;
         }
     }
     if (thunk_used_) {
@@ -723,6 +739,7 @@ std::string loaderReport(const Loader& loader) {
             << ",\"load_bias_offset\":" << r.load_bias_offset
             << ",\"mixed_pages_read_execute\":" << r.mixed_pages_read_execute
             << ",\"tls_read_rewrites\":" << r.tls_read_rewrites
+            << ",\"inline_syscalls_adapted\":" << r.inline_syscalls_adapted
             << ",\"tls_adapter_bytes\":" << r.tls_adapter_bytes
             << ",\"data_only_relocations_skipped\":" << r.data_only_relocations_skipped
             << ",\"constructors_called\":" << r.constructors_called << ",\"needed\":";

@@ -1,8 +1,10 @@
 # wrapper-lite
 
-The experimental native macOS ARM64 Apple Music authentication experiment is documented in
-[`native/macos/README.md`](native/macos/README.md). Run its isolated probes with
-`./script/build_and_run.sh`. The experiment is separate from the HTTP service.
+The native macOS ARM64 desktop app and local HTTP API are documented in
+[`native/macos/README.md`](native/macos/README.md). Run
+`./script/build_and_run.sh` to open the desktop app, or use `--serve` for the
+local API on port `12341`. These run directly on macOS without Docker or QEMU.
+The original Linux/QEMU service is documented below.
 
 A lightweight single-port HTTP wrapper for Apple Music decryption.
 

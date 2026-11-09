@@ -15,6 +15,28 @@ _callGuestReturn:
     mov x5, x7
     br x16
 
+.p2align 2
+.globl _callGuestReturn9
+_callGuestReturn9:
+    stp x29, x30, [sp, #-32]!
+    mov x29, sp
+    mov x16, x0
+    mov x8, x1
+    mov x17, x2
+    ldr x9, [x17, #64]
+    str x9, [sp, #16]
+    // Keep the ninth argument at the callee's sp, above the saved frame.
+    sub sp, sp, #16
+    str x9, [sp]
+    ldp x0, x1, [x17]
+    ldp x2, x3, [x17, #16]
+    ldp x4, x5, [x17, #32]
+    ldp x6, x7, [x17, #48]
+    blr x16
+    add sp, sp, #16
+    ldp x29, x30, [sp], #32
+    ret
+
 // Capture Linux register-save areas before calling the typed formatter. Darwin
 // variadic callees require stack arguments, so direct forwarding is invalid.
 .p2align 2

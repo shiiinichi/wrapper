@@ -6,6 +6,8 @@ import os
 from pathlib import Path
 import signal
 import subprocess
+import threading
+import time
 
 ROOT = Path(__file__).resolve().parents[2]
 BUILD = ROOT / "build/native-poc"
@@ -15,7 +17,19 @@ def main():
     parser.add_argument("--binary", type=Path, default=BUILD / "wrapper-native-poc")
     parser.add_argument("--assets", type=Path, default=BUILD / "assets")
     parser.add_argument("--data-dir", type=Path, default=BUILD / "auth-profile")
+    parser.add_argument("--owner-pid", type=int, default=None)
     args = parser.parse_args()
+    def interrupt(*_):
+        raise KeyboardInterrupt
+    signal.signal(signal.SIGTERM, interrupt)
+    if args.owner_pid:
+        def watch_owner():
+            while True:
+                if os.getppid() != args.owner_pid:
+                    os.kill(os.getpid(), signal.SIGTERM)
+                    return
+                time.sleep(0.25)
+        threading.Thread(target=watch_owner, daemon=True).start()
     args.data_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
     args.data_dir.chmod(0o700)
     print("Opening native wrapper sign-in prompts. Enter your Apple Account details in the macOS dialogs.", flush=True)

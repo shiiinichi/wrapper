@@ -90,6 +90,18 @@ sret_probe:
     ret
 .size sret_probe, .-sret_probe
 
+.global sret9_probe
+.type sret9_probe, %function
+sret9_probe:
+    stp x0, x1, [x8]
+    stp x2, x3, [x8, #16]
+    stp x4, x5, [x8, #32]
+    stp x6, x7, [x8, #48]
+    ldr x9, [sp]
+    str x9, [x8, #64]
+    ret
+.size sret9_probe, .-sret9_probe
+
 .global format_probe
 .type format_probe, %function
 format_probe:
@@ -183,16 +195,16 @@ cf_format_probe:
     for offset in range(symbol_section[4], symbol_section[4] + symbol_section[5], 24):
         name, info, _, _, value, size = struct.unpack_from("<IBBHQQ", obj, offset)
         label = names[name:names.index(0, name)].decode()
-        if label in ("tls_probe", "sret_probe", "format_probe", "cf_format_probe"):
+        if label in ("tls_probe", "sret_probe", "sret9_probe", "format_probe", "cf_format_probe"):
             exports.append((label, value, size))
     strings = b"\0" + b"".join(label.encode() + b"\0" for label, _, _ in exports)
     data[0x2020:0x2020 + len(strings)] = strings
     for index, (label, value, size) in enumerate(exports, 1):
         struct.pack_into("<IBBHQQ", data, 0x2080 + index * 24, strings.index(label.encode()), 0x12, 0, 1, 0x1000 + value, size)
     count = len(exports) + 1
-    struct.pack_into("<" + "I" * (3 + count), data, 0x2100, 1, count, 1, 0, *range(2, count), 0)
+    struct.pack_into("<" + "I" * (3 + count), data, 0x2140, 1, count, 1, 0, *range(2, count), 0)
     for i, (tag, value) in enumerate([(5, 0x10020), (10, len(strings)), (6, 0x10060),
-                                     (11, 24), (4, 0x10100), (0, 0)]):
+                                     (11, 24), (4, 0x10140), (0, 0)]):
         if tag == 6:
             value = 0x10080
         struct.pack_into("<qQ", data, 0x2180 + i * 16, tag, value)

@@ -200,11 +200,21 @@ bool writablePath(const char* path) {
     for (const auto& component : relative) if (component == "..") return false;
     return true;
 }
+ssize_t checkedRead(int descriptor, void* buffer, size_t count, size_t capacity) {
+    if (count > capacity) unsupported("__read_chk buffer bounds");
+    return readBridge(descriptor, buffer, count);
+}
+void guestInlineTimeSyscall(uint64_t* registers) {
+    if (registers[8] != 169) unsupported("inline syscall number");
+    int code = gettimeofdayBridge(reinterpret_cast<int64_t*>(registers[0]), reinterpret_cast<void*>(registers[1]));
+    registers[0] = code < 0 ? static_cast<uint64_t>(-guestErrno()) : static_cast<uint64_t>(code);
+}
 Bridge posixBridge(const std::string& name) {
 #define BRIDGE(symbol, function) if (name == symbol) return {reinterpret_cast<void*>(&function), false, false}
     BRIDGE("open", openBridge); BRIDGE("open64", openBridge); BRIDGE("close", closeBridge);
     BRIDGE("__open_2", openChecked);
     BRIDGE("read", readBridge); BRIDGE("write", writeBridge); BRIDGE("pread", preadBridge); BRIDGE("pread64", preadBridge);
+    BRIDGE("__read_chk", checkedRead);
     BRIDGE("pwrite", pwriteBridge); BRIDGE("pwrite64", pwriteBridge); BRIDGE("lseek", lseekBridge); BRIDGE("lseek64", lseekBridge);
     BRIDGE("ftruncate", truncateBridge); BRIDGE("ftruncate64", truncateBridge); BRIDGE("mkdir", mkdirBridge); BRIDGE("chmod", chmodBridge);
     BRIDGE("unlink", unlinkBridge); BRIDGE("rename", renameBridge); BRIDGE("fsync", fsyncBridge); BRIDGE("fdatasync", fsyncBridge);
@@ -212,6 +222,7 @@ Bridge posixBridge(const std::string& name) {
     BRIDGE("fstat", fstatBridge); BRIDGE("fstat64", fstatBridge); BRIDGE("fcntl", fcntlBridge); BRIDGE("flock", flockBridge); BRIDGE("access", accessBridge);
     BRIDGE("umask", umaskBridge);
     BRIDGE("gettimeofday", gettimeofdayBridge); BRIDGE("clock_gettime", clockBridge); BRIDGE("nanosleep", nanosleepBridge);
+    BRIDGE("sleep", ::sleep);
     BRIDGE("socket", socketBridge); BRIDGE("ioctl", ioctlBridge);
     BRIDGE("sysconf", sysconfBridge); BRIDGE("getcwd", getcwdBridge); BRIDGE("mmap", mmapBridge); BRIDGE("mmap64", mmapBridge); BRIDGE("munmap", munmapBridge);
 #undef BRIDGE

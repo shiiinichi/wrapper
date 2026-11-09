@@ -3,6 +3,7 @@
 #include "abi_selftest.h"
 #include "services.h"
 #include "authentication.h"
+#include "native_api.h"
 
 #if !defined(__APPLE__) || !defined(__aarch64__)
 #error "This proof of concept must be compiled as a native arm64 macOS executable."
@@ -120,15 +121,17 @@ int main(int argc, char** argv) {
     rlimit core{0, 0};
     setrlimit(RLIMIT_CORE, &core);
     std::unique_ptr<Loader> loader;
-    std::string assets, mode, library, data_directory, prompt_script;
+    std::string assets, mode, library, data_directory, prompt_script, adam_id, key_uri;
     bool apple_profile = false;
     try {
         for (int i = 1; i < argc; ++i) {
             std::string arg = argv[i];
-            if ((arg == "--assets" || arg == "--data-dir" || arg == "--prompt-script" || arg == "--probe" || arg == "--inspect" || arg == "--initialize") && i + 1 < argc) {
+            if ((arg == "--assets" || arg == "--data-dir" || arg == "--prompt-script" || arg == "--adam-id" || arg == "--key-uri" || arg == "--api" || arg == "--probe" || arg == "--inspect" || arg == "--initialize") && i + 1 < argc) {
                 if (arg == "--assets") assets = argv[++i];
                 else if (arg == "--data-dir") data_directory = argv[++i];
                 else if (arg == "--prompt-script") prompt_script = argv[++i];
+                else if (arg == "--adam-id") adam_id = argv[++i];
+                else if (arg == "--key-uri") key_uri = argv[++i];
                 else {
                     if (!mode.empty()) throw std::runtime_error("choose exactly one probe/inspect/initialize mode");
                     mode = arg;
@@ -139,7 +142,8 @@ int main(int argc, char** argv) {
             } else if (arg == "--help") {
                 std::cout << "usage: wrapper-native-poc --assets DIR [--apple-profile] [--probe NAME | --inspect LIB.so | --initialize LIB.so] [--data-dir DIR]\n"
                     "probes: zlib, blocks, coreadi-jni, lskd-jni, services, auth-preflight, auth-network, auth-status\n"
-                    "interactive sign-in: ./script/build_and_run.sh --login\n";
+                    "interactive sign-in: ./script/build_and_run.sh --login\n"
+                    "native HTTP API: ./script/build_and_run.sh --serve\n";
                 return 0;
             } else throw std::runtime_error("unknown or incomplete argument: " + arg);
         }
@@ -147,7 +151,9 @@ int main(int argc, char** argv) {
         loader = std::make_unique<Loader>(assets, apple_profile);
         std::string result = "null";
         bool operation_ok = true;
-        if (mode == "--probe") {
+        if (mode == "--api" && apple_profile) {
+            result = native_poc::nativeApi(*loader, data_directory, library, adam_id, key_uri);
+        } else if (mode == "--probe") {
             if (library == "zlib") result = probeZlib(*loader);
             else if (library == "blocks") result = probeBlocks(*loader);
             else if (library == "coreadi-jni" && apple_profile) result = native_poc::probeAppleJni(*loader, "libCoreADI.so");
@@ -176,12 +182,12 @@ int main(int argc, char** argv) {
             << ",\"result\":" << result << ",\"loader\":" << loaderReport(*loader) << "}\n";
         // Services own background ELF workers. This isolated probe gives their
         // images process lifetime; do not unmap live worker instructions.
-        if (mode == "--probe" && (library == "services" || library.rfind("auth-", 0) == 0)) { std::cout.flush(); std::_Exit(operation_ok ? 0 : 1); }
+        if (mode == "--api" || (mode == "--probe" && (library == "services" || library.rfind("auth-", 0) == 0))) { std::cout.flush(); std::_Exit(operation_ok ? 0 : 1); }
         return 0;
     } catch (const std::exception& error) {
         std::cout << "{\"ok\":false,\"error\":" << jsonString(error.what()) << ",\"loader\":"
             << (loader ? loaderReport(*loader) : "null") << "}\n";
-        if (mode == "--probe" && (library == "services" || library.rfind("auth-", 0) == 0)) { std::cout.flush(); std::_Exit(1); }
+        if (mode == "--api" || (mode == "--probe" && (library == "services" || library.rfind("auth-", 0) == 0))) { std::cout.flush(); std::_Exit(1); }
         return 1;
     }
 }

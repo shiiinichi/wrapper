@@ -4,3 +4,6 @@
 extern "C" void callGuestReturn(void* function, void* result, const void* a0 = nullptr,
     const void* a1 = nullptr, const void* a2 = nullptr, const void* a3 = nullptr,
     const void* a4 = nullptr, const void* a5 = nullptr);
+// Nine fixed integer/pointer arguments; argument nine is placed on the guest
+// stack while x8 retains the independent C++ result pointer.
+extern "C" void callGuestReturn9(void* function, void* result, const void* const* arguments);
