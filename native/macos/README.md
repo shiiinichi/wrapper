@@ -15,7 +15,7 @@ Requires Apple Silicon, Xcode command-line tools, Python 3, and this repository'
 ARM64 Git history. No additional packages are required.
 
 The repository's default build and CI target the native macOS app. CMake on
-macOS also delegates to `script/build_and_run.sh`; the inherited emulated-wrapper
+macOS also delegates to `script/build_and_run.sh`; the inherited Linux-wrapper
 documentation and workflow are archived under `legacy/`.
 
 ```sh

@@ -1,17 +1,12 @@
 # Legacy wrapper-lite reference
 
-These are the original Linux/emulated-wrapper instructions. The current macOS
+These are the original Linux-wrapper instructions. The current macOS
 app builds and runs natively; see [the project README](../README.md).
 This legacy setup is not required by the macOS app.
 
 A lightweight single-port HTTP wrapper for Apple Music decryption.
 
 It provides five endpoints on one HTTP port: M3U8, Key, Lyrics, License, and WebPlayback.
-
-> **Recommended way to run**: use the `wrapper-lite-qemu` launcher — it boots a
-> self-contained QEMU guest and forwards the HTTP API to the host, so you don't
-> need a rooted device or a native chroot. See
-> [Run with QEMU](#run-with-qemu-recommended).
 
 ## Build
 
@@ -33,7 +28,7 @@ Build outputs:
 - `wrapper-lite` — privileged host launcher
 - `wrapper-lite-rootless` — rootless host launcher (user namespaces)
 
-## Run natively
+## Run on Linux
 
 ```bash
 # Login, cache tokens, then exit
@@ -47,44 +42,6 @@ Build outputs:
 
 - Interactive prompt when a TTY is available.
 - With `--code-from-file`, the code is read from `data/2fa.txt`.
-
-## Run with QEMU (recommended)
-
-`wrapper-lite-qemu` is the recommended launcher. It boots the prebuilt guest
-(the `qemu/` assets) in QEMU and forwards the guest's HTTP service to the host,
-so no rooted device or native chroot is required. Prebuilt releases already
-bundle QEMU plus its firmware in `qemu/bin/` for Linux, macOS, Windows and
-Android.
-
-```bash
-# one-time: build the launcher (or download a prebuilt release)
-c++ -std=c++11 -O2 -o wrapper-lite-qemu wrapper-lite-qemu.cpp
-
-# login first (forwards --login to the guest lite), then serve
-./wrapper-lite-qemu --login user:pass --code-from-file
-./wrapper-lite-qemu
-```
-
-The launcher locates the QEMU binary in this order:
-
-1. `--qemu-bin <path>` / `QEMU_BIN`
-2. `qemu/bin/` (bundled)
-3. `PATH`
-
-The bundled QEMU is preferred so that the firmware (`-L qemu/bin`), the QEMU
-modules (`QEMU_MODULE_DIR`) and the support libraries (`qemu/lib`) always come
-from the same package. `-L`, `LD_LIBRARY_PATH` and `QEMU_MODULE_DIR` are only
-adjusted for the bundled QEMU; a system QEMU keeps its own libraries, modules
-and firmware.
-
-A package never ships glibc (`libc.so.6`, `libm.so.6`): the ELF interpreter is
-always the host's and cannot be replaced through `LD_LIBRARY_PATH`, so the
-loader and libc must stay a matched pair from the host. Only non-glibc support
-libraries are bundled, in `qemu/lib/` (`qemu/bin/` on Android, where the Termux
-packages place them next to the binary).
-
-See [QEMU launcher arguments](#qemu-launcher-arguments) for the full option
-list.
 
 ## Docker
 
@@ -172,33 +129,6 @@ The trailing `AndroidID` is derived automatically:
   exists, a built-in default is used.
 
 Pass `--device-info <string>` to override the entire string explicitly.
-
-## QEMU launcher arguments
-
-| Argument | Default | Description |
-|----------|---------|-------------|
-| `--host <addr>` | `127.0.0.1` | host address the forwarded port binds to (`0.0.0.0` to expose) |
-| `--host-port <port>` | `12340` | host port |
-| `--guest-port <port>` | `12340` | guest port |
-| `--guest-host <addr>` | `0.0.0.0` | address the guest lite listens on (must be reachable by QEMU forwarding) |
-| `--memory <MB>` | `512` | guest memory in MB |
-| `--smp <N>` | `2` | guest CPU count |
-| `--accel <accel>` | auto | force acceleration (`kvm`, `hvf`, `whpx`, `tcg`) |
-| `--qemu-bin <path>` | auto | QEMU binary path |
-
-Environment variables (fallbacks; command-line flags take precedence):
-
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `LITE_QEMU_HOST` | `127.0.0.1` | host address the forwarded port binds to |
-| `HOST_PORT` | `12340` | host port |
-| `GUEST_PORT` | `12340` | guest port |
-| `LITE_GUEST_HOST` | `0.0.0.0` | address the guest lite listens on |
-| `MEMORY` | `512` | guest memory in MB |
-| `SMP` | `2` | guest CPU count |
-| `LITE_DNS` | — | forwarded to the guest as `--dns` |
-| `LITE_QEMU_ACCEL` | auto | force acceleration |
-| `QEMU_BIN` | auto | QEMU binary path |
 
 ## Build notes
 
