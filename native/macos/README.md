@@ -14,6 +14,10 @@ The original `WorldObservationLog/wrapper` `lite` baseline is
 Requires Apple Silicon, Xcode command-line tools, Python 3, and this repository's
 ARM64 Git history. No additional packages are required.
 
+The repository's default build and CI target the native macOS app. CMake on
+macOS also delegates to `script/build_and_run.sh`; the inherited emulated-wrapper
+documentation and workflow are archived under `legacy/`.
+
 ```sh
 ./script/build_and_run.sh
 ./script/build_and_run.sh --serve

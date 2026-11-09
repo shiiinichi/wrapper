@@ -1,5 +1,23 @@
 cmake_minimum_required(VERSION 3.25)
 
+if(CMAKE_HOST_SYSTEM_NAME STREQUAL "Darwin")
+    project(wrapper-native VERSION 0.1.0 LANGUAGES NONE)
+    if(NOT CMAKE_HOST_SYSTEM_PROCESSOR MATCHES "^(arm64|aarch64)$")
+        message(FATAL_ERROR "The native macOS build requires Apple Silicon running an arm64 shell.")
+    endif()
+    # Use the same native build/package entrypoint as the desktop Run action.
+    add_custom_target(wrapper-native ALL
+        COMMAND "${CMAKE_SOURCE_DIR}/script/build_and_run.sh" --app-build
+        WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
+        USES_TERMINAL VERBATIM)
+    add_custom_target(native-verify
+        COMMAND "${CMAKE_SOURCE_DIR}/script/build_and_run.sh" --verify
+        WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
+        USES_TERMINAL VERBATIM)
+    return()
+endif()
+
+# The original Android/Linux build remains available for legacy development.
 set(CMAKE_C_STANDARD 99)
 set(CMAKE_CXX_STANDARD 11)
 
@@ -104,8 +122,7 @@ if(CMAKE_BUILD_TYPE STREQUAL "Release")
 endif()
 target_link_options(lite PRIVATE -Wl,--unresolved-symbols=ignore-in-object-files)
 
-# Host launchers are kept for native chroot/namespace use, but QEMU (run.sh)
-# is the default startup path.  Build them only when explicitly requested.
+# Linux host launchers use the original chroot/namespace implementation.
 option(BUILD_HOST_LAUNCHERS "Build wrapper-lite and wrapper-lite-rootless host launchers" ON)
 if(BUILD_HOST_LAUNCHERS)
     ExternalProject_Add(
