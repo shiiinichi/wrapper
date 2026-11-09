@@ -38,8 +38,12 @@ of the account profile.
 `--serve --port 12341` runs the same server without the GUI. `--app-build` builds
 the app without launching it. The bundle contains the native executable, Python
 server modules, and pinned library blobs; account data stays outside the bundle.
-The development launch reuses `build/native-poc/auth-profile`. A direct Finder
-launch remembers that profile; a new installation defaults to Application Support.
+Development launches, standalone servers, and sign-in use
+`~/Library/Application Support/Native Music Wrapper` for account data, outside
+build folders and Git checkouts. A direct Finder launch remembers the last profile.
+Set `WRAPPER_PROFILE_DIR` for an isolated development profile, or pass `--data-dir`
+to the standalone server/sign-in command. Older profiles under
+`build/native-poc/auth-profile` can be preserved by selecting that directory explicitly.
 
 `--probes` runs the earlier isolated execution, initialization, and service probes.
 Each probe child has a 15-second timeout and core dumps disabled. Debug mode opens the actual
@@ -52,7 +56,7 @@ wrapper account data is copied.
 
 ## Local HTTP API
 
-The server binds to loopback and uses the original JSON envelope:
+The server binds to loopback. Control endpoints use the original JSON envelope:
 
 ```json
 {"code":0,"msg":"SUCCESS","data":{}}
@@ -67,6 +71,7 @@ The desktop also verifies a per-server instance identifier before reporting read
 | `/status` | GET | Native saved-account presence, storefront regions, and backend identity. |
 | `/m3u8` | GET | `adamId`; enhanced HLS from Apple's catalog using native-issued account tokens. |
 | `/key` | GET | `adamId`, `uri`; requests the native FairPlay persistent key. See the context limitation below. |
+| `/decrypt` | POST | Binary sample batch; `X-Native-Context` from `/key`. Returns the same binary sample framing. |
 | `/lyrics` | GET | `adamId`; optional `language`, `syllable`, and `script`; preserves TTML localizations. |
 | `/webplayback` | GET | `adamId`; Apple web playback playlist using native-issued account tokens. |
 | `/license` | POST | JSON `adamId`, `challenge`, `uri`, optional `drm-type` (`wv` or `pr`). Requires a real player/CDM challenge. |
@@ -78,13 +83,33 @@ challenge bodies, tokens, keys, signed URLs, and lyric content. The server never
 forwards requests to the Docker service. Browser-origin requests and foreign Host
 headers are rejected; this development API is intended for local application clients.
 
-**Native `/key` does not provide a Temari playback template.** Its `contentKey`
-is the actual ARM64 library's persistent-key result. The x86 `ctx`, `state`, and
-register snapshots from the Linux service cannot be reused as ARM64 snapshots.
-The native response explicitly reports `temariCompatible:false`; `/status`
-reports `temari_compatible:false`. The desktop marks a successful key request as
-limited, and does not claim sample decryption or audio playback. Existing Temari
-clients still need the original backend for sample processing.
+**Native sample decryption uses a separate, versioned API.** `/key` returns the
+actual persistent `contentKey`, `nativeDecryptionVersion:1`, and an opaque
+`nativeContext` handle. `/status` advertises `native_sample_decryption:true`.
+The x86 `ctx`, `state`, and register snapshots cannot be reused on ARM64, so
+`temariCompatible:false` / `temari_compatible:false` still describe that legacy
+template ABI. Clients must support the native API to process samples.
+
+`POST /decrypt` uses `Content-Type: application/octet-stream` and the
+`X-Native-Context` header. The body is a big-endian `uint32` sample count followed
+by each sample's big-endian `uint32` length and bytes. Successful responses use
+the same framing and content type; errors retain the JSON `code`/`msg` envelope.
+Batches contain 1–8192 nonempty samples, each at most 4 MiB, with a total body
+limit of 16 MiB minus 8 bytes. Every sample resets CBC state, decrypts its complete
+16-byte blocks, and preserves its unaligned tail, matching Temari's sample
+contract. Sample lengths and ordering stay unchanged.
+
+The HTTP process retains at most 32 context descriptors for 30 idle minutes.
+One isolated ARM64 worker loads the libraries once and serves repeated batches.
+It is recycled after 64 key attempts, before the library's internal context limit;
+live descriptors are rehydrated lazily after recycling or a worker exit. Before
+opening a new context, the worker resets the library's per-asset key cache so a
+different key URI for the same song cannot reuse another rendition's key. Existing
+contexts retain their owning references. Requests share the existing profile lock,
+have bounded pipe deadlines, and stop their worker
+on server shutdown. HTTP cache storage is disabled; plaintext samples are neither
+persisted nor logged. An unknown/expired handle returns code 409 so a client can request `/key`
+again. The service never forwards samples to an external decryption backend.
 
 The desktop shows endpoint summaries without displaying keys, tokens, signed
 manifest URLs, or lyric text. Its license row explains why a DRM challenge is
@@ -92,7 +117,7 @@ needed instead of inventing a successful license response.
 
 Every response carries an `app;dur=...` `Server-Timing` measurement. Sanitized
 timestamp/endpoint/method/result-code/server-milliseconds records append to
-`auth-profile/http-timings.jsonl` with mode `0600`. The desktop's Response column
+`http-timings.jsonl` inside the private profile with mode `0600`. The desktop's Response column
 measures the client round trip for each API call, separately from subsequent
 playlist validation. Copy Summary includes these measurements; Show Timings
 reveals the private file. Timings include cold token acquisition when needed.
@@ -129,7 +154,7 @@ are never command arguments, environment variables, or report fields. Android
 library logging and curl verbose logging are disabled during authentication.
 
 The persistent profile is separate from bootstrap probes and the Linux wrapper:
-`build/native-poc/auth-profile/`. Its random 16-character device identifier is
+`~/Library/Application Support/Native Music Wrapper/`. Its random 16-character device identifier is
 saved once in `native-device-id` with mode `0600`; the directory is `0700`.
 Apple's library owns account, cookie, and provisioning storage there. Cancelled
 and failed sign-ins return nonzero, with `authenticated:false`. Successful sign-in
@@ -166,7 +191,7 @@ To inspect a persisted account without validating credentials or starting login:
 
 ```sh
 build/native-poc/wrapper-native-poc --assets build/native-poc/assets \
-  --apple-profile --probe auth-status --data-dir build/native-poc/auth-profile
+  --apple-profile --probe auth-status --data-dir "$HOME/Library/Application Support/Native Music Wrapper"
 ```
 
 A stored account is persistence evidence, not a token-validity check.
@@ -208,9 +233,9 @@ Blocks-to-macOS callback tests also remain.
 **The default service probe is bootstrap before sign-in.** It does not read
 credentials, start authentication, or request a lease. Automatic lease refresh
 is disabled; the manager receives empty Android callbacks. Presentation callbacks
-stop unexpected credential/dialog interaction. Sample decryption and playback
-remain future work. Creating
-service objects does not prove those later operations work.
+stop unexpected credential/dialog interaction. This probe does not exercise
+sample decryption or playback; the native API checks below cover decryption
+separately. Creating service objects does not prove those later operations work.
 
 To retain a separate probe profile between invocations:
 
@@ -340,8 +365,20 @@ The development-Mac live run with `adamId=1552791761` passes native account stat
 enhanced HLS playlist validation, word/line TTML, WebPlayback playlist validation,
 and native FairPlay persistent-key retrieval. The desktop start/stop/restart and
 quit/relaunch flows were exercised; quitting releases the local server port.
-The key result remains Temari-incompatible and no audio is played. License input
-validation is covered; actual license issuance still needs a real CDM challenge.
+The legacy Temari template ABI remains incompatible. Native sample decryption was
+verified offline on ALAC, AAC, and EC-3 segments, decoding 175, 701, and 468 audio
+frames respectively. An ALAC batch containing 175 samples / 3,326,499 bytes remained
+byte-identical across 100 repeated decryptions. Warm worker processing was about
+35–43 MB/s for that ALAC fixture on this Mac; this excludes key acquisition and
+network time and is not a general throughput guarantee. These checks produced no
+audio output. License input validation is covered; actual license issuance still
+needs a real CDM challenge.
+
+Cross-rendition validation also opens ALAC and AAC keys for the same catalog song,
+then an EC-3 key, and verifies all three retained contexts again after switching.
+Both preshare and song-specific keys are exercised. The account-free worker
+fixture reproduces the library's per-asset cache; its format-switch regression
+fails when the cache reset is omitted and passes with the reset enabled.
 
 To record a new live endpoint report (including client and server times):
 

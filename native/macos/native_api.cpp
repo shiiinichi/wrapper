@@ -11,8 +11,10 @@
 #include <cstdlib>
 #include <cstring>
 #include <ctime>
+#include <memory>
 #include <regex>
 #include <stdexcept>
+#include <vector>
 #include <unistd.h>
 #include "../../lite/storefront_ids.inc"
 #include "fairplay_certificate.h"
@@ -131,7 +133,7 @@ std::string nativeApi(Loader& loader, const std::string& directory, const std::s
     setGuestLogging(false);
     auto services = initializeServices(loader, directory, profileIdentity(directory));
     bool account = accountPresent(loader, services);
-    if (operation == "status") return "{\"regions\":[" + (account ? jsonString(storefront(loader, services)) : "") + "],\"account_present\":" + (account ? "true" : "false") + ",\"backend\":\"macos-arm64\",\"temari_compatible\":false}";
+    if (operation == "status") return "{\"regions\":[" + (account ? jsonString(storefront(loader, services)) : "") + "],\"account_present\":" + (account ? "true" : "false") + ",\"backend\":\"macos-arm64\",\"temari_compatible\":false,\"native_sample_decryption\":true}";
     if (!account) throw std::runtime_error("no saved account; sign in first");
     if (operation == "tokens") return tokens(loader, services);
     GuestString identifier(adam.c_str()), key_uri(uri.c_str()), format("com.apple.streamingkeydelivery"), version("1"), server("https://play.itunes.apple.com/WebObjects/MZPlay.woa/music/fps"), protocol("simplified"), certificate(fairplayCertificate);
@@ -141,5 +143,150 @@ std::string nativeApi(Loader& loader, const std::string& directory, const std::s
     auto content = text(key.object);
     if (content.empty()) throw std::runtime_error("native FairPlay key retrieval returned empty");
     return "{\"adamId\":" + jsonString(adam) + ",\"keyUri\":" + jsonString(uri) + ",\"contentKey\":" + jsonString(content) + ",\"temariCompatible\":false}";
+}
+
+namespace {
+using Bytes = std::vector<unsigned char>;
+constexpr size_t maximumFrame = 16 * 1024 * 1024;
+void appendWord(Bytes& bytes, uint32_t value) {
+    for (int shift = 24; shift >= 0; shift -= 8) bytes.push_back(static_cast<unsigned char>(value >> shift));
+}
+class Frame {
+public:
+    explicit Frame(const Bytes& value) : bytes(value) {}
+    uint32_t word() {
+        if (bytes.size() - offset < 4) throw std::runtime_error("truncated sample frame");
+        uint32_t value = 0;
+        for (unsigned n = 0; n < 4; ++n) value = (value << 8) | bytes[offset++];
+        return value;
+    }
+    Bytes take(size_t count) {
+        if (count > bytes.size() - offset) throw std::runtime_error("truncated sample frame");
+        Bytes value(bytes.begin() + offset, bytes.begin() + offset + count);
+        offset += count;
+        return value;
+    }
+    std::string string(size_t limit) {
+        auto count = word();
+        if (!count || count > limit) throw std::runtime_error("invalid sample frame string");
+        auto value = take(count);
+        if (std::any_of(value.begin(), value.end(), [](unsigned char c) { return c < 32 || c == 127; }))
+            throw std::runtime_error("invalid sample frame string");
+        return std::string(value.begin(), value.end());
+    }
+    void end() const { if (offset != bytes.size()) throw std::runtime_error("trailing sample frame bytes"); }
+private:
+    const Bytes& bytes;
+    size_t offset = 0;
+};
+bool readFrame(Bytes& result) {
+    unsigned char header[4];
+    size_t count = std::fread(header, 1, 4, stdin);
+    if (!count && std::feof(stdin)) return false;
+    if (count != 4) throw std::runtime_error("truncated worker header");
+    uint32_t size = (uint32_t(header[0]) << 24) | (uint32_t(header[1]) << 16) | (uint32_t(header[2]) << 8) | header[3];
+    if (!size || size > maximumFrame) throw std::runtime_error("invalid worker frame length");
+    result.resize(size);
+    if (std::fread(result.data(), 1, size, stdin) != size) throw std::runtime_error("truncated worker frame");
+    return true;
+}
+void writeFrame(bool success, const Bytes& result) {
+    Bytes header;
+    appendWord(header, static_cast<uint32_t>(result.size() + 1));
+    header.push_back(success ? 0 : 1);
+    if (std::fwrite(header.data(), 1, header.size(), stdout) != header.size() ||
+        std::fwrite(result.data(), 1, result.size(), stdout) != result.size() || std::fflush(stdout))
+        throw std::runtime_error("worker response pipe closed");
+}
+struct NativeContext {
+    Loader& loader;
+    GuestShared key, owner;
+    void* kd = nullptr;
+    std::string content;
+    explicit NativeContext(Loader& value) : loader(value) {}
+    ~NativeContext() {
+        for (auto* value : {&owner, &key}) if (value->control)
+            fn<void (*)(void*)>(loader, strings, "_ZNSt6__ndk119__shared_weak_count16__release_sharedEv")(value->control);
+    }
+};
+std::unique_ptr<NativeContext> createContext(Loader& loader, const Services& services, const std::string& adam, const std::string& uri) {
+    if (adam.empty() || adam.size() > 19 || !std::all_of(adam.begin(), adam.end(), [](char c) { return c >= '0' && c <= '9'; }) ||
+        uri.rfind("skd://", 0) != 0 || uri.size() > 8192 || (adam != "0" && uri == "skd://itunes.apple.com/P000000000/s1/e1"))
+        throw std::runtime_error("invalid native context request");
+    auto value = std::make_unique<NativeContext>(loader);
+    GuestString identifier(adam.c_str()), keyUri(uri.c_str()), format("com.apple.streamingkeydelivery"), version("1"),
+        server("https://play.itunes.apple.com/WebObjects/MZPlay.woa/music/fps"), protocol("simplified"), certificate(fairplayCertificate);
+    const void* arguments[] = {services.foothill, &identifier, &identifier, &keyUri, &format, &version, &server, &protocol, &certificate};
+    callGuestReturn9(loader.symbol(music, "_ZN21SVFootHillSessionCtrl16getPersistentKeyERKNSt6__ndk112basic_stringIcNS0_11char_traitsIcEENS0_9allocatorIcEEEES8_S8_S8_S8_S8_S8_S8_"), &value->key, arguments);
+    value->content = text(value->key.object);
+    if (value->content.empty()) throw std::runtime_error("native key retrieval failed");
+    uint32_t type = 5;
+    bool video = false;
+    callGuestReturn(loader.symbol(music, "_ZN21SVFootHillSessionCtrl14decryptContextERKNSt6__ndk112basic_stringIcNS0_11char_traitsIcEENS0_9allocatorIcEEEERKN11SVDecryptor15SVDecryptorTypeERKb"), &value->owner,
+                    services.foothill, value->key.object, &type, &video);
+    if (!value->owner.object) throw std::runtime_error("native decryption context unavailable");
+    auto address = fn<void** (*)(void*)>(loader, music, "_ZNK18SVFootHillPContext9kdContextEv")(value->owner.object);
+    if (address && *address) std::memcpy(&value->kd, *address, sizeof(void*));
+    if (!value->kd) throw std::runtime_error("native decryption context unavailable");
+    return value;
+}
+}
+
+void nativeDecryptionWorker(Loader& loader, const std::string& directory) {
+    if (isatty(STDIN_FILENO) || isatty(STDOUT_FILENO)) throw std::runtime_error("sample worker requires private pipes");
+    setGuestLogging(false);
+    auto services = initializeServices(loader, directory, profileIdentity(directory));
+    if (!accountPresent(loader, services)) throw std::runtime_error("no saved account");
+    std::vector<std::unique_ptr<NativeContext>> contexts;
+    writeFrame(true, Bytes{'N', 'A', 'D', '2'});
+    Bytes request;
+    while (readFrame(request)) {
+        try {
+            Frame input(request);
+            auto operation = input.word();
+            Bytes response;
+            if (operation == 1) {
+                auto adam = input.string(19), uri = input.string(8192);
+                input.end();
+                if (contexts.size() >= 64) throw std::runtime_error("native context capacity reached");
+                auto value = createContext(loader, services, adam, uri);
+                appendWord(response, static_cast<uint32_t>(contexts.size() + 1));
+                appendWord(response, static_cast<uint32_t>(value->content.size()));
+                response.insert(response.end(), value->content.begin(), value->content.end());
+                contexts.push_back(std::move(value));
+            } else if (operation == 2) {
+                auto handle = input.word(), count = input.word();
+                if (!handle || handle > contexts.size() || !count || count > 8192) throw std::runtime_error("invalid native sample batch");
+                std::vector<Bytes> samples;
+                samples.reserve(count);
+                for (uint32_t n = 0; n < count; ++n) {
+                    auto size = input.word();
+                    if (!size || size > 4 * 1024 * 1024) throw std::runtime_error("invalid native sample size");
+                    samples.push_back(input.take(size));
+                }
+                input.end(); // Validate the entire batch before invoking the library.
+                appendWord(response, count);
+                auto decrypt = fn<int (*)(void*, uint32_t, void*, void*, uint32_t)>(loader, music, "NfcRKVnxuKZy04KWbdFu71Ou");
+                for (auto& sample : samples) {
+                    // Temari's contract: independent samples, aligned prefix, unchanged tail.
+                    auto aligned = static_cast<uint32_t>(sample.size() / 16 * 16);
+                    if (aligned && decrypt(contexts[handle - 1]->kd, 5, sample.data(), sample.data(), aligned) != 0)
+                        throw std::runtime_error("native sample decryption failed");
+                    appendWord(response, static_cast<uint32_t>(sample.size()));
+                    response.insert(response.end(), sample.begin(), sample.end());
+                }
+            } else if (operation == 3) {
+                input.end();
+                // FootHill caches persistent keys by asset, ignoring the URI on
+                // cache hits. Clear that cache before opening another key URI.
+                // Existing contexts remain owned by the worker's shared_ptrs.
+                fn<void (*)(void*)>(loader, music, "_ZN21SVFootHillSessionCtrl16resetAllContextsEv")(services.foothill);
+            } else throw std::runtime_error("unknown native sample operation");
+            writeFrame(true, response);
+        } catch (const std::exception&) {
+            // No keys, input samples, account identifiers, or guest errors enter diagnostics.
+            writeFrame(false, {});
+        }
+    }
 }
 }

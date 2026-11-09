@@ -7,6 +7,7 @@ import json
 from pathlib import Path
 import subprocess
 import tempfile
+import shutil
 import threading
 import unittest
 from unittest.mock import patch
@@ -14,6 +15,7 @@ import urllib.request
 import xml.etree.ElementTree as ET
 
 from http_server import NativeBackend, NativeHTTPServer
+import http_server
 from web_api import ApiError, line_lyrics
 from package_desktop import stage
 
@@ -29,6 +31,10 @@ class MemoryBackend:
     def execute(self, route, query, body):
         self.calls.append((route, query, body))
         return {"regions": ["ph"], "account_present": True}
+
+    def decrypt(self, token, data):
+        self.calls.append(("/decrypt", token, data))
+        return data
 
 
 class HttpBoundaryTests(unittest.TestCase):
@@ -83,6 +89,48 @@ class HttpBoundaryTests(unittest.TestCase):
     def test_oversize_body_is_rejected_before_reading_or_dispatch(self):
         self.assertEqual(self.request("/license", b"{}", {"Content-Length": str(1024 * 1024 + 1)})[1]["code"], 413)
         self.assertEqual(self.backend.calls, [])
+
+    def test_binary_sample_route_preserves_bytes_and_disables_response_caching(self):
+        body = b"\0\0\0\x01\0\0\0\x03abc"
+        request = urllib.request.Request(self.base + "/decrypt", data=body,
+                                         headers={"Content-Type": "application/octet-stream", "X-Native-Context": "fixture-handle"})
+        with urllib.request.urlopen(request, timeout=3) as response:
+            self.assertEqual(response.headers["Content-Type"], "application/octet-stream")
+            self.assertEqual(response.headers["Cache-Control"], "no-store")
+            self.assertEqual(response.read(), body)
+        self.assertEqual(self.backend.calls, [("/decrypt", "fixture-handle", body)])
+        self.assertEqual(self.backend.timings[0]["endpoint"], "/decrypt")
+        self.assertNotIn("fixture-handle", json.dumps(self.backend.timings))
+
+    def test_binary_route_rejects_wrong_method_type_and_oversize_body(self):
+        self.assertEqual(self.request("/decrypt")[1]["code"], 405)
+        self.assertEqual(self.request("/decrypt", b"{}")[1]["code"], 400)
+        self.assertEqual(self.request("/decrypt", b"x", {"Content-Length": str(16*1024*1024+1)})[1]["code"], 413)
+        self.assertEqual(self.backend.calls, [])
+
+
+class ProfileStorageTests(unittest.TestCase):
+    def test_default_account_profile_survives_removing_checkout(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            checkout, home = root / "checkout", root / "home"
+            checkout.mkdir()
+            profile = home / "Library/Application Support/Native Music Wrapper"
+            def launch():
+                with patch.object(Path, "home", return_value=home), patch.object(http_server, "BUILD", checkout / "build/native-poc"), \
+                     patch("http_server.sys.argv", ["http_server.py"]), patch("http_server.signal.signal"), \
+                     patch("http_server.NativeHTTPServer") as server, contextlib.redirect_stdout(io.StringIO()):
+                    server.return_value.serve_forever.side_effect = KeyboardInterrupt
+                    self.assertEqual(http_server.main(), 0)
+                    self.assertEqual(server.call_args.args[1].profile, profile.resolve())
+            launch()
+            identity = profile / "native-device-id"
+            identity.write_text("fixture-identity")
+            shutil.rmtree(checkout)
+            launch()
+            self.assertEqual(identity.read_text(), "fixture-identity")
+            self.assertEqual(profile.stat().st_mode & 0o777, 0o700)
+            self.assertFalse(checkout.exists())
 
 
 class NativeDispatchTests(unittest.TestCase):

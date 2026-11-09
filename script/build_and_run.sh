@@ -3,6 +3,7 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 BUILD_DIR="$ROOT_DIR/build/native-poc"
+PROFILE_DIR="${WRAPPER_PROFILE_DIR:-$HOME/Library/Application Support/Native Music Wrapper}"
 MODE="${1:-run}"
 APP_BINARY="$BUILD_DIR/wrapper-native-poc"
 
@@ -15,10 +16,14 @@ case "$MODE" in
   *) echo "usage: $0 [run|--app-build|--probes|--build|--serve|--verify|--debug|--logs|--telemetry|--login]" >&2; exit 2 ;;
 esac
 
-# Stop this project's desktop app and isolated workers before rebuilding.
+# Stop this project's desktop app before replacing its bundle or signing in.
 # The desktop-owned server watches its parent and exits when the app stops.
-pkill -x NativeMusicWrapper >/dev/null 2>&1 || true
-pkill -x wrapper-native-poc >/dev/null 2>&1 || true
+case "$MODE" in
+  run|--app|app|--app-build|--serve|serve|--login|login|--debug|debug)
+    pkill -x NativeMusicWrapper >/dev/null 2>&1 || true
+    pkill -x wrapper-native-poc >/dev/null 2>&1 || true
+    ;;
+esac
 mkdir -p "$BUILD_DIR"
 python3 "$ROOT_DIR/native/macos/prepare_assets.py" --destination "$BUILD_DIR/assets"
 xcrun clang++ -arch arm64 -std=c++17 -O1 -g -Wall -Wextra -Werror \
@@ -49,16 +54,16 @@ case "$MODE" in
       "${DESKTOP_SOURCES[@]}" -o "$APP_BUNDLE/Contents/MacOS/NativeMusicWrapper"
     /usr/bin/codesign --force --sign - "$APP_BUNDLE"
     if [[ "$MODE" != --app-build ]]; then
-      /usr/bin/open -n "$APP_BUNDLE" --args --profile "$BUILD_DIR/auth-profile"
+      /usr/bin/open -n "$APP_BUNDLE" --args --profile "$PROFILE_DIR"
     fi
     exit 0
     ;;
   --serve|serve)
     shift
-    exec python3 "$ROOT_DIR/native/macos/http_server.py" --binary "$APP_BINARY" --assets "$BUILD_DIR/assets" "$@"
+    exec python3 "$ROOT_DIR/native/macos/http_server.py" --binary "$APP_BINARY" --assets "$BUILD_DIR/assets" --data-dir "$PROFILE_DIR" "$@"
     ;;
   --login|login)
-    exec python3 "$ROOT_DIR/native/macos/sign_in.py" --binary "$APP_BINARY" --assets "$BUILD_DIR/assets"
+    exec python3 "$ROOT_DIR/native/macos/sign_in.py" --binary "$APP_BINARY" --assets "$BUILD_DIR/assets" --data-dir "$PROFILE_DIR"
     ;;
   --debug|debug)
     exec xcrun lldb -- "$APP_BINARY" --assets "$BUILD_DIR/assets" --apple-profile --initialize libandroidappmusic.so
@@ -66,6 +71,7 @@ case "$MODE" in
   --verify|verify)
     python3 "$ROOT_DIR/native/macos/test_loader.py" --binary "$APP_BINARY" --assets "$BUILD_DIR/assets"
     python3 "$ROOT_DIR/native/macos/test_http_server.py"
+    python3 "$ROOT_DIR/native/macos/test_native_decryption.py"
     ;;
 esac
 # Logs and telemetry are the bounded probe's JSON report and stderr. There is

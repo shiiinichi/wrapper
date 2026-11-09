@@ -64,13 +64,15 @@ Responses preserve the original JSON envelope:
 | `/status` | GET | Saved-account status, storefront regions, backend identity. |
 | `/m3u8` | GET | `adamId`. |
 | `/key` | GET | `adamId`, `uri` from the enhanced HLS manifest. |
+| `/decrypt` | POST | Framed binary audio samples and the `X-Native-Context` handle from `/key`. |
 | `/lyrics` | GET | `adamId`; optional `language`, `syllable`, `script`. |
 | `/webplayback` | GET | `adamId`. |
 | `/license` | POST | JSON `adamId`, `challenge`, `uri`; optional `drm-type` (`wv` or `pr`). |
 
-The native key response does not yet supply a Temari sample-decryption template.
-The desktop marks that limitation explicitly. Actual DRM license issuance needs
-a player/CDM-generated challenge; audio playback remains unverified.
+The native key response supplies a versioned, opaque sample-decryption handle.
+Compatible clients send sample batches to `/decrypt`; a persistent ARM64 worker
+decrypts them without x86 snapshots. Legacy Temari templates remain unsupported.
+Actual DRM license issuance needs a player/CDM-generated challenge.
 
 See the [native implementation guide](native/macos/README.md) for authentication,
 token lifecycle, compatibility boundaries, and detailed validation evidence.

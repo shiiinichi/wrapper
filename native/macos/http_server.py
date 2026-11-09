@@ -18,6 +18,7 @@ import urllib.parse
 import uuid
 
 from web_api import ApiError, AppleWebApi
+from native_decryption import MAX_FRAME, NativeDecryption
 
 ROOT = Path(__file__).resolve().parents[2]
 BUILD = ROOT / "build/native-poc"
@@ -37,23 +38,35 @@ class NativeBackend:
         self.profile.mkdir(parents=True, exist_ok=True, mode=0o700)
         self.profile.chmod(0o700)
         self.web = AppleWebApi(self.tokens)
+        self.decryption = NativeDecryption(self.binary, self.assets, self.profile)
+
+    @contextlib.contextmanager
+    def profile_access(self):
+        descriptor = os.open(self.profile / "native-api.lock", os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
+        with os.fdopen(descriptor, "r+") as lock_file:
+            deadline = time.monotonic() + 65
+            while True:
+                try:
+                    fcntl.flock(lock_file, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    break
+                except BlockingIOError:
+                    if self.stopped or time.monotonic() >= deadline:
+                        raise ApiError(503, "Native account profile is busy")
+                    time.sleep(0.05)
+            yield
+
+    def decrypt(self, token, data):
+        with self.lock, self.profile_access():
+            if self.stopped:
+                raise ApiError(503, "Native server is stopping")
+            return self.decryption.decrypt(token, data)
 
     def call(self, operation, adam="", uri=""):
         with self.lock:
             if self.stopped:
                 raise ApiError(503, "Native server is stopping")
             # Serialize users of this profile across server processes as well.
-            descriptor = os.open(self.profile / "native-api.lock", os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
-            with os.fdopen(descriptor, "r+") as lock_file:
-                deadline = time.monotonic() + 65
-                while True:
-                    try:
-                        fcntl.flock(lock_file, fcntl.LOCK_EX | fcntl.LOCK_NB)
-                        break
-                    except BlockingIOError:
-                        if self.stopped or time.monotonic() >= deadline:
-                            raise ApiError(503, "Native account profile is busy")
-                        time.sleep(0.05)
+            with self.profile_access():
                 command = [str(self.binary), "--assets", str(self.assets), "--apple-profile", "--api", operation,
                            "--data-dir", str(self.profile)]
                 if adam:
@@ -117,7 +130,10 @@ class NativeBackend:
                 raise ApiError(400, "missing uri")
             if not uri.startswith("skd://") or len(uri) > 8192 or any(ord(c) < 32 for c in uri) or (adam != "0" and uri == PREFETCH):
                 raise ApiError(400, "invalid uri for adamId")
-            return self.call("key", adam, uri)
+            with self.lock, self.profile_access():
+                if self.stopped:
+                    raise ApiError(503, "Native server is stopping")
+                return self.decryption.context(adam, uri)
         if route == "/lyrics":
             syllable = query.get("syllable", "1").lower() not in ("0", "false", "no", "off")
             with self.lock:
@@ -144,6 +160,7 @@ class NativeBackend:
             if self.active is not None:
                 with contextlib.suppress(ProcessLookupError):
                     self.active.kill()
+        self.decryption.close()
 
     def record_timing(self, route, method, code, milliseconds):
         record = {"time_utc": datetime.datetime.now(datetime.timezone.utc).isoformat(),
@@ -189,14 +206,15 @@ class Handler(BaseHTTPRequestHandler):
     def handle_api(self, method):
         started = time.monotonic()
         route = urllib.parse.urlsplit(self.path).path
+        binary = None
         try:
             host = self.headers.get("Host", "").split(":", 1)[0]
             if host not in ("127.0.0.1", "localhost") or self.headers.get("Origin"):
                 raise ApiError(403, "Local clients only")
-            routes = {"/status", "/m3u8", "/key", "/lyrics", "/webplayback", "/license"}
+            routes = {"/status", "/m3u8", "/key", "/lyrics", "/webplayback", "/license", "/decrypt"}
             if route not in routes:
                 raise ApiError(404, "not found")
-            if (route == "/license") != (method == "POST"):
+            if (route in {"/license", "/decrypt"}) != (method == "POST"):
                 raise ApiError(405, "method not allowed")
             if self.headers.get("Transfer-Encoding"):
                 raise ApiError(400, "transfer encoding is unsupported")
@@ -207,16 +225,24 @@ class Handler(BaseHTTPRequestHandler):
             body = {}
             if method == "POST":
                 length = int(self.headers.get("Content-Length", "0"))
-                if length < 0 or length > 1024 * 1024:
+                limit = MAX_FRAME if route == "/decrypt" else 1024 * 1024
+                if length < 0 or length > limit:
                     raise ApiError(413, "request body is too large")
                 raw = self.rfile.read(length)
-                try:
-                    body = json.loads(raw)
-                except (ValueError, UnicodeError):
-                    raise ApiError(400, "invalid JSON body") from None
-                if not isinstance(body, dict):
-                    raise ApiError(400, "JSON body must be an object")
-            result = self.server.backend.execute(route, query, body)
+                if len(raw) != length:
+                    raise ApiError(400, "truncated request body")
+                if route == "/decrypt":
+                    if self.headers.get("Content-Type") != "application/octet-stream":
+                        raise ApiError(400, "native sample batches require application/octet-stream")
+                    binary = self.server.backend.decrypt(self.headers.get("X-Native-Context", ""), raw)
+                else:
+                    try:
+                        body = json.loads(raw)
+                    except (ValueError, UnicodeError):
+                        raise ApiError(400, "invalid JSON body") from None
+                    if not isinstance(body, dict):
+                        raise ApiError(400, "JSON body must be an object")
+            result = {} if binary is not None else self.server.backend.execute(route, query, body)
             if route == "/status":
                 result.update({"server_instance": self.server.instance, "backend": "macos-arm64"})
             payload = {"code": 0, "msg": "SUCCESS", "data": result}
@@ -226,15 +252,15 @@ class Handler(BaseHTTPRequestHandler):
             payload = {"code": 400, "msg": "invalid request"}
         except Exception:
             payload = {"code": 500, "msg": "native request failed"}
-        raw = json.dumps(payload, separators=(",", ":")).encode()
+        raw = binary if binary is not None and payload["code"] == 0 else json.dumps(payload, separators=(",", ":")).encode()
         milliseconds = (time.monotonic() - started) * 1000
         # Record a known endpoint name only, never arbitrary query/URI text.
-        timing_route = route if route in {"/status", "/m3u8", "/key", "/lyrics", "/webplayback", "/license"} else "unknown"
+        timing_route = route if route in {"/status", "/m3u8", "/key", "/lyrics", "/webplayback", "/license", "/decrypt"} else "unknown"
         self.server.backend.record_timing(timing_route, method, payload["code"], milliseconds)
         try:
             # Keep the lite API's HTTP-200 / JSON-code contract.
             self.send_response(200)
-            self.send_header("Content-Type", "application/json; charset=utf-8")
+            self.send_header("Content-Type", "application/octet-stream" if binary is not None and payload["code"] == 0 else "application/json; charset=utf-8")
             self.send_header("Content-Length", str(len(raw)))
             self.send_header("Cache-Control", "no-store")
             self.send_header("X-Wrapper-Backend", "native-macos-arm64")
@@ -249,7 +275,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--binary", type=Path, default=BUILD / "wrapper-native-poc")
     parser.add_argument("--assets", type=Path, default=BUILD / "assets")
-    parser.add_argument("--data-dir", type=Path, default=BUILD / "auth-profile")
+    parser.add_argument("--data-dir", type=Path, default=Path.home() / "Library/Application Support/Native Music Wrapper")
     parser.add_argument("--host", choices=("127.0.0.1", "localhost"), default="127.0.0.1")
     parser.add_argument("--port", type=int, default=12341)
     parser.add_argument("--instance-id", default=None)

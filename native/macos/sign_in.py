@@ -16,7 +16,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--binary", type=Path, default=BUILD / "wrapper-native-poc")
     parser.add_argument("--assets", type=Path, default=BUILD / "assets")
-    parser.add_argument("--data-dir", type=Path, default=BUILD / "auth-profile")
+    parser.add_argument("--data-dir", type=Path, default=Path.home() / "Library/Application Support/Native Music Wrapper")
     parser.add_argument("--owner-pid", type=int, default=None)
     args = parser.parse_args()
     def interrupt(*_):

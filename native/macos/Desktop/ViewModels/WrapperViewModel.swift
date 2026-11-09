@@ -165,12 +165,17 @@ final class WrapperViewModel {
                     guard let keyURI else { throw WrapperError(message: "A track key URI is needed from the enhanced manifest.") }
                     let result = try await client.get("key", ["adamId": track, "uri": keyURI])
                     guard let key = result["contentKey"] as? String, !key.isEmpty else { throw WrapperError(message: "No key was returned.") }
-                    detail = "Key retrieved; sample playback context is not available yet."
-                    guard generation == run else { return }
-                    checks[index].state = .limited
-                    checks[index].detail = detail
-                    checks[index].milliseconds = client.lastResponseMilliseconds
-                    continue
+                    if result["nativeDecryptionVersion"] as? Int == 1,
+                       let context = result["nativeContext"] as? String, !context.isEmpty {
+                        detail = "Key retrieved; native sample decryption available."
+                    } else {
+                        detail = "Key retrieved; sample decryption is unavailable."
+                        guard generation == run else { return }
+                        checks[index].state = .limited
+                        checks[index].detail = detail
+                        checks[index].milliseconds = client.lastResponseMilliseconds
+                        continue
+                    }
                 default: continue
                 }
                 guard generation == run else { return }

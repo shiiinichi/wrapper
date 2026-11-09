@@ -15,7 +15,7 @@ def stage(destination, binary, assets):
     runtime.mkdir(parents=True, exist_ok=True)
     shutil.copy2(binary, contents / "MacOS/wrapper-native-poc")
     source = Path(__file__).resolve().parent
-    for name in ("http_server.py", "web_api.py", "sign_in.py", "sign_in.applescript"):
+    for name in ("http_server.py", "web_api.py", "native_decryption.py", "sign_in.py", "sign_in.applescript"):
         shutil.copy2(source / name, runtime / name)
     # Package only the pinned public blobs, never arbitrary neighboring files.
     manifest = json.loads((assets / "manifest.json").read_text())

@@ -137,6 +137,9 @@ int main(int argc, char** argv) {
                     mode = arg;
                     library = argv[++i];
                 }
+            } else if (arg == "--decryption-worker") {
+                if (!mode.empty()) throw std::runtime_error("choose exactly one operation");
+                mode = arg;
             } else if (arg == "--apple-profile") {
                 apple_profile = true;
             } else if (arg == "--help") {
@@ -149,6 +152,10 @@ int main(int argc, char** argv) {
         }
         if (assets.empty() || mode.empty()) throw std::runtime_error("--assets and one operation are required");
         loader = std::make_unique<Loader>(assets, apple_profile);
+        if (mode == "--decryption-worker" && apple_profile) {
+            native_poc::nativeDecryptionWorker(*loader, data_directory);
+            std::_Exit(0); // Keep ELF worker code mapped until process exit.
+        }
         std::string result = "null";
         bool operation_ok = true;
         if (mode == "--api" && apple_profile) {
@@ -185,6 +192,7 @@ int main(int argc, char** argv) {
         if (mode == "--api" || (mode == "--probe" && (library == "services" || library.rfind("auth-", 0) == 0))) { std::cout.flush(); std::_Exit(operation_ok ? 0 : 1); }
         return 0;
     } catch (const std::exception& error) {
+        if (mode == "--decryption-worker") std::_Exit(1); // Never mix diagnostics with binary sample frames.
         std::cout << "{\"ok\":false,\"error\":" << jsonString(error.what()) << ",\"loader\":"
             << (loader ? loaderReport(*loader) : "null") << "}\n";
         if (mode == "--api" || (mode == "--probe" && (library == "services" || library.rfind("auth-", 0) == 0))) { std::cout.flush(); std::_Exit(1); }
