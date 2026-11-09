@@ -1,5 +1,9 @@
 # wrapper-lite
 
+The experimental native macOS ARM64 ELF loader is documented in
+[`native/macos/README.md`](native/macos/README.md). Run its isolated probes with
+`./script/build_and_run.sh`. The experiment is separate from the HTTP service.
+
 A lightweight single-port HTTP wrapper for Apple Music decryption.
 
 It provides five endpoints on one HTTP port: M3U8, Key, Lyrics, License, and WebPlayback.
