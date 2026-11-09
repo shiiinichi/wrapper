@@ -89,7 +89,7 @@ CMake is optional. The commands above produce the same desktop app under
 
 ## Project history
 
-This private development branch derives from the original wrapper-lite project.
+This project derives from the original wrapper-lite project.
 The inherited Linux/emulated-wrapper instructions and workflow are archived under
 [`legacy/`](legacy/README.md); they are not part of the macOS build or CI.
 
