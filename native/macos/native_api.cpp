@@ -16,7 +16,7 @@
 #include <stdexcept>
 #include <vector>
 #include <unistd.h>
-#include "../../lite/storefront_ids.inc"
+#include "storefront_ids.inc"
 #include "fairplay_certificate.h"
 
 namespace native_poc {

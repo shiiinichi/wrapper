@@ -1,25 +1,31 @@
 # Native macOS ARM64 desktop app and HTTP API
 
-This experiment executes the actual Android ARM64 Apple Music initializers and
-service bootstrap, authentication, and API operations in a native arm64 macOS
-process. A SwiftUI desktop app manages the local server. It uses no Docker,
-QEMU, Linux VM, APK runtime, or Rosetta. The original Linux wrapper remains separate.
+This implementation executes the Android ARM64 Apple Music libraries directly in
+native arm64 macOS worker processes for service bootstrap, authentication, API
+operations, and sample decryption. A SwiftUI desktop app manages the local server.
+It uses no Docker,
+QEMU, Linux VM, APK runtime, or Rosetta. The old Linux runtime remains in Git history.
 
 The original `WorldObservationLog/wrapper` `lite` baseline is
-`e51e370a6b0660ed9d722fff1add079098aeb935`. The pinned ARM64 binary source is
-`c0a456f578212ef77d53aa2b5ad8cfdfe25a63c2`.
+`e51e370a6b0660ed9d722fff1add079098aeb935`. The vendored ARM64 libraries originated
+from `c0a456f578212ef77d53aa2b5ad8cfdfe25a63c2`; that hash is provenance, not a
+build dependency.
 
 ## Run and verify
 
-Requires Apple Silicon, Xcode command-line tools, Python 3, and this repository's
-ARM64 Git history. No additional packages are required.
+Requires Apple Silicon, Xcode command-line tools, and Python 3. The 17 required
+Android ARM64 libraries are included directly in `native/macos/assets/` on `lite`.
+A normal checkout or source archive contains everything needed to build; no
+other branch, Git history, Android root filesystem, or Android NDK is required.
 
-The repository's default build and CI target the native macOS app. CMake on
-macOS also delegates to `script/build_and_run.sh`; the inherited Linux-wrapper
-documentation and workflow are archived under `legacy/`.
+The repository's default build targets the native macOS app. The GitHub workflow
+is disabled; use `script/build_and_run.sh --verify` for local verification. CMake
+on macOS also delegates to that script. The old Linux build, launchers, root
+filesystem, and documentation have been removed from the checkout.
 
 ```sh
 ./script/build_and_run.sh
+./script/build_and_run.sh --app-build
 ./script/build_and_run.sh --serve
 ./script/build_and_run.sh --verify
 ./script/build_and_run.sh --probes
@@ -36,14 +42,19 @@ is terminated. Signing in temporarily stops the server to avoid concurrent use
 of the account profile.
 
 `--serve --port 12341` runs the same server without the GUI. `--app-build` builds
-the app without launching it. The bundle contains the native executable, Python
+the app without launching it. Run, package-build, serve, sign-in, and debug modes
+stop the existing desktop app and native workers before proceeding. `--verify`,
+`--probes`, and `--build` leave the running desktop app in place.
+
+The bundle contains the native executable, Python
 server modules, and pinned library blobs; account data stays outside the bundle.
 Development launches, standalone servers, and sign-in use
 `~/Library/Application Support/Native Music Wrapper` for account data, outside
 build folders and Git checkouts. A direct Finder launch remembers the last profile.
-Set `WRAPPER_PROFILE_DIR` for an isolated development profile, or pass `--data-dir`
-to the standalone server/sign-in command. Older profiles under
-`build/native-poc/auth-profile` can be preserved by selecting that directory explicitly.
+Set `WRAPPER_PROFILE_DIR` when using the build script for an isolated development
+profile, or pass `--data-dir` when invoking `http_server.py` or `sign_in.py`
+directly. If an older profile exists under `build/native-poc/auth-profile`, select
+that directory explicitly to reuse it.
 
 `--probes` runs the earlier isolated execution, initialization, and service probes.
 Each probe child has a 15-second timeout and core dumps disabled. Debug mode opens the actual
@@ -54,6 +65,15 @@ Assets, SHA-256/Git-blob provenance (`manifest.json`), binaries, and evidence
 uses a fresh temporary directory there and removes it afterward. No existing
 wrapper account data is copied.
 
+Asset preparation reads the 17 required ARM64 libraries from
+`native/macos/assets/`, including the native runtime dependencies and the
+independent zlib/Blocks checks. It validates their architecture, sizes, and SHA-256
+checksums against the included manifest. Original commit, path, and blob IDs are
+recorded only for provenance; the build never reads or fetches Git objects.
+Unused Android platform libraries are omitted.
+Previously generated, unchanged unused libraries are pruned using their old
+manifest hashes; caller-owned or modified files are preserved.
+
 ## Local HTTP API
 
 The server binds to loopback. Control endpoints use the original JSON envelope:
@@ -62,7 +82,7 @@ The server binds to loopback. Control endpoints use the original JSON envelope:
 {"code":0,"msg":"SUCCESS","data":{}}
 ```
 
-Like lite, errors use a nonzero JSON `code` with HTTP status 200. Responses carry
+API errors use a nonzero JSON `code` with HTTP status 200. Responses carry
 `X-Wrapper-Backend: native-macos-arm64` so clients can identify this implementation.
 The desktop also verifies a per-server instance identifier before reporting ready.
 
@@ -70,7 +90,7 @@ The desktop also verifies a per-server instance identifier before reporting read
 | --- | --- | --- |
 | `/status` | GET | Native saved-account presence, storefront regions, and backend identity. |
 | `/m3u8` | GET | `adamId`; enhanced HLS from Apple's catalog using native-issued account tokens. |
-| `/key` | GET | `adamId`, `uri`; requests the native FairPlay persistent key. See the context limitation below. |
+| `/key` | GET | `adamId`, `uri`; returns the native persistent key and an opaque sample-decryption context. |
 | `/decrypt` | POST | Binary sample batch; `X-Native-Context` from `/key`. Returns the same binary sample framing. |
 | `/lyrics` | GET | `adamId`; optional `language`, `syllable`, and `script`; preserves TTML localizations. |
 | `/webplayback` | GET | `adamId`; Apple web playback playlist using native-issued account tokens. |
@@ -78,9 +98,9 @@ The desktop also verifies a per-server instance identifier before reporting read
 
 The server uses bounded native child processes and serializes access to each
 profile. A child failure or timeout returns a JSON error while the HTTP process
-stays available. Tokens stay in process memory; request logs omit query strings,
-challenge bodies, tokens, keys, signed URLs, and lyric content. The server never
-forwards requests to the Docker service. Browser-origin requests and foreign Host
+stays available. Server token and context caches stay in process memory; request
+logs omit query strings, challenge bodies, tokens, keys, signed URLs, and lyric
+content. Browser-origin requests and foreign Host
 headers are rejected; this development API is intended for local application clients.
 
 **Native sample decryption uses a separate, versioned API.** `/key` returns the
@@ -89,18 +109,21 @@ actual persistent `contentKey`, `nativeDecryptionVersion:1`, and an opaque
 The x86 `ctx`, `state`, and register snapshots cannot be reused on ARM64, so
 `temariCompatible:false` / `temari_compatible:false` still describe that legacy
 template ABI. Clients must support the native API to process samples.
+No Temari library is loaded or packaged by the native wrapper.
 
 `POST /decrypt` uses `Content-Type: application/octet-stream` and the
 `X-Native-Context` header. The body is a big-endian `uint32` sample count followed
 by each sample's big-endian `uint32` length and bytes. Successful responses use
 the same framing and content type; errors retain the JSON `code`/`msg` envelope.
 Batches contain 1–8192 nonempty samples, each at most 4 MiB, with a total body
-limit of 16 MiB minus 8 bytes. Every sample resets CBC state, decrypts its complete
-16-byte blocks, and preserves its unaligned tail, matching Temari's sample
-contract. Sample lengths and ordering stay unchanged.
+limit of 16 MiB minus 8 bytes. Samples are processed independently: complete
+16-byte blocks are decrypted and each unaligned tail is preserved. Sample lengths
+and ordering stay unchanged.
 
-The HTTP process retains at most 32 context descriptors for 30 idle minutes.
-One isolated ARM64 worker loads the libraries once and serves repeated batches.
+The HTTP process retains at most 32 context descriptors. Contexts expire after
+30 idle minutes; expiry is checked on key/decryption requests. One isolated ARM64
+worker loads the libraries once and serves repeated batches. The idle worker
+stays loaded until shutdown or recycling.
 It is recycled after 64 key attempts, before the library's internal context limit;
 live descriptors are rehydrated lazily after recycling or a worker exit. Before
 opening a new context, the worker resets the library's per-asset key cache so a
@@ -153,7 +176,7 @@ masked. The authentication child reads them through a private pipe; credentials
 are never command arguments, environment variables, or report fields. Android
 library logging and curl verbose logging are disabled during authentication.
 
-The persistent profile is separate from bootstrap probes and the Linux wrapper:
+The persistent profile is separate from bootstrap probes and the Git checkout:
 `~/Library/Application Support/Native Music Wrapper/`. Its random 16-character device identifier is
 saved once in `native-device-id` with mode `0600`; the directory is `0700`.
 Apple's library owns account, cookie, and provisioning storage there. Cancelled
@@ -196,7 +219,8 @@ build/native-poc/wrapper-native-poc --assets build/native-poc/assets \
 
 A stored account is persistence evidence, not a token-validity check.
 
-The live development-Mac test now completes with `authenticated:true`, response
+Recorded sign-in validation on the development Mac completed with
+`authenticated:true`, response
 type `6`, a positive account identifier, `account_present:true`, and exit status
 `0`. A separate process reloads that profile with `stored_account:true`; all four
 databases pass `PRAGMA quick_check`. The final successful attempt had zero
@@ -246,8 +270,8 @@ build/native-poc/wrapper-native-poc --assets build/native-poc/assets \
 
 `--data-dir` is required for this direct probe. Use a directory dedicated to the
 native experiment. Its permissions are set to `0700`; guest file writes are
-limited to that directory. The current disposable profile uses a fixed synthetic
-Android identifier, not account/device data from the Linux wrapper.
+limited to that directory. The disposable service probe uses a fixed synthetic
+Android identifier and does not use saved account/device data.
 
 Service initialization starts real guest worker threads. Their ELF mappings have
 process lifetime: after emitting the result, this isolated child exits without
@@ -314,8 +338,8 @@ Native database opens are limited to the dedicated profile (or `:memory:`).
 
 This removes the observed Android SQLite failure without modifying encrypted
 code/data tables in the proprietary libraries. It does not implement general
-`x18` virtualization for arbitrary Android machine code. Paths beyond the tested
-bootstrap/authentication operations still need independent runtime validation.
+`x18` virtualization for arbitrary Android machine code. Coverage is limited to
+the bootstrap, authentication, API, and sample-decryption operations listed below.
 The report counts successful native SQLite opens; persistence tests require this
 backend and validate the resulting standard SQLite databases.
 
@@ -326,8 +350,10 @@ their image bias is host-page aligned. The Apple profile chooses a legal 4 KiB
 load-bias offset inside the allocation: `+4096` for CoreADI/Android libc++,
 `+12288` for CoreFP/CoreLSKD. Code/data boundaries then fall on separate host
 pages. Relative addresses remain intact, code is RX, and writable data stays RW.
-All sixteen images have zero mixed W/X pages. CoreLSKD's writes during device
-configuration now complete.
+All sixteen images in the service dependency graph have zero mixed W/X pages.
+The seventeenth bundled library is Android's Blocks runtime for its independent
+probe; the service graph uses macOS Blocks. CoreLSKD's writes during device
+configuration complete.
 
 Larger ELF alignment gets an aligned allocation within a bounded reservation.
 Remaining code/data page conflicts still prevent execution; the earlier
@@ -339,6 +365,25 @@ RX. Host security settings, JIT entitlements, library validation, and SIP are
 unchanged. The helper uses ordinary local ad-hoc signing.
 
 ## Evidence and tests
+
+Latest local validation: **2026-11-10**, after removal of the legacy
+source/root filesystem and inclusion of the 17 required libraries in the native
+source tree. The full native checks also passed from an ordinary source copy
+without `.git` or `rootfs/`, with the `git` command explicitly disabled.
+
+| Suite | Passing tests |
+| --- | ---: |
+| Native loader and ABI | 34 |
+| HTTP API, profile storage, and packaging | 17 |
+| Native sample worker | 8 |
+| Vendored native asset preparation | 6 |
+| **Total** | **65** |
+
+The native desktop build and signature verification also passed. The relaunched
+server reported a saved account and native sample-decryption support. Live ALAC,
+AAC, and EC-3 sample batches matched the reference bytes after the cleanup;
+these checks did not start audio playback. GitHub Actions remains disabled, so
+these are local verification results.
 
 `build/native-poc/report.json` records constructor/JNI results, service state,
 TLS adapter counts/sizes, original/effective mixed-page counts, bias offsets,
@@ -360,17 +405,22 @@ The HTTP suite checks backend identity, request validation, localhost-only
 access, child failures/timeouts, token redaction, and line-lyric localization.
 The indirect-return fixture includes a ninth stack argument, as used by the
 native FairPlay key operation.
+Asset regressions stage libraries from an ordinary source copy without `.git`
+or `rootfs/`, and cover checksums, architecture, missing libraries, pruning, and
+preservation of caller-owned files.
 
-The development-Mac live run with `adamId=1552791761` passes native account status,
+Earlier development-Mac endpoint validation with `adamId=1552791761` passed native account status,
 enhanced HLS playlist validation, word/line TTML, WebPlayback playlist validation,
 and native FairPlay persistent-key retrieval. The desktop start/stop/restart and
 quit/relaunch flows were exercised; quitting releases the local server port.
-The legacy Temari template ABI remains incompatible. Native sample decryption was
-verified offline on ALAC, AAC, and EC-3 segments, decoding 175, 701, and 468 audio
-frames respectively. An ALAC batch containing 175 samples / 3,326,499 bytes remained
+The legacy Temari template ABI remains incompatible. Earlier offline decryption
+checks on ALAC, AAC, and EC-3 segments decoded 175, 701, and 468 audio frames
+respectively; these decoder-frame counts differ from framed sample-batch counts.
+An ALAC batch containing 175 samples / 3,326,499 bytes remained
 byte-identical across 100 repeated decryptions. Warm worker processing was about
-35–43 MB/s for that ALAC fixture on this Mac; this excludes key acquisition and
-network time and is not a general throughput guarantee. These checks produced no
+35–43 MB/s in that earlier ALAC fixture check on this Mac; this excludes key
+acquisition and network time and is not a current resource benchmark or general
+throughput guarantee. These checks produced no
 audio output. License input validation is covered; actual license issuance still
 needs a real CDM challenge.
 
@@ -394,12 +444,11 @@ request observed in the desktop took 4–5 seconds with token acquisition; subse
 requests were below one second. These are observations on the development Mac,
 not fixed latency guarantees.
 
-Strict baseline diagnostics remain available:
+Native loader diagnostics remain available:
 
 ```sh
-python3 native/macos/run.py --inspect-baseline
 build/native-poc/wrapper-native-poc --assets build/native-poc/assets \
-  --inspect libandroidappmusic.so
+  --apple-profile --inspect libandroidappmusic.so
 ```
 
 Inspection `ok:true` means inspection completed, not that code ran. Constructor

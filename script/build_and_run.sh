@@ -72,6 +72,7 @@ case "$MODE" in
     python3 "$ROOT_DIR/native/macos/test_loader.py" --binary "$APP_BINARY" --assets "$BUILD_DIR/assets"
     python3 "$ROOT_DIR/native/macos/test_http_server.py"
     python3 "$ROOT_DIR/native/macos/test_native_decryption.py"
+    python3 "$ROOT_DIR/native/macos/test_assets.py"
     ;;
 esac
 # Logs and telemetry are the bounded probe's JSON report and stderr. There is

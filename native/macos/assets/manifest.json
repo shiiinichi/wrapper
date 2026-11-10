@@ -1,0 +1,109 @@
+{
+  "source_commit": "c0a456f578212ef77d53aa2b5ad8cfdfe25a63c2",
+  "source_path": "native/macos/assets",
+  "files": [
+    {
+      "library": "libBlocksRuntime.so",
+      "git_blob": "e54e11ef4f736b0c5c847e2bfdf6fae82dc70c5f",
+      "sha256": "9bd192dd48182c1e8e019cd0d01d5c61f8a11bdba1637aec58ca60705e296890",
+      "bytes": 10936
+    },
+    {
+      "library": "libCoreADI.so",
+      "git_blob": "ecf3e7f32a6ce298a3ec7896c82702b6561c9062",
+      "sha256": "9d5b557cf3faf88c34c394ab2cd7fc1a3b4acf3aed51f28cd0bc093858107c22",
+      "bytes": 1792592
+    },
+    {
+      "library": "libCoreFP.so",
+      "git_blob": "c5a55670ac7579fbf7f0d0fa884a53b39a9c9dce",
+      "sha256": "e35e1b5de1cc796032da6bde5430148b0f0abb38c066059a19bfe0ad1a677b17",
+      "bytes": 8197696
+    },
+    {
+      "library": "libCoreLSKD.so",
+      "git_blob": "694b2ee201ad04d0122d0c02746dc3b01972b822",
+      "sha256": "389aa1320e86c84001f7b28236dfa121600ff0c0fbec2b2e25682a83d4e6f4ea",
+      "bytes": 8304000
+    },
+    {
+      "library": "libOpenSLES.so",
+      "git_blob": "ac7e2e741133093c21b630fe0dffe0372b1202a7",
+      "sha256": "e6f9e61eb33dc78b04f43150124573d6ecdd911c4381585a468066de80c2ad0c",
+      "bytes": 9712
+    },
+    {
+      "library": "libandroidappmusic.so",
+      "git_blob": "f9135585ef0cb3aba969ec6af06ad3cddcf34a3d",
+      "sha256": "689f421ab39ba103596344fea9bdd812d629f353b54afb39a73b417ddff7dbe1",
+      "bytes": 6173520
+    },
+    {
+      "library": "libc++_shared.so",
+      "git_blob": "54f51fea06039676e0a695f422c32df3f53abb6a",
+      "sha256": "af729ee868913bb298b7360939ba31865372222646edddcfa4ed9bca6484bf1c",
+      "bytes": 911696
+    },
+    {
+      "library": "libdaapkit.so",
+      "git_blob": "48dc83a161498a967c0a778d9dd60381c753f56b",
+      "sha256": "77be633d55e0e766d58d083c746524a40ef251ec73f888686cf16658cba78519",
+      "bytes": 201120
+    },
+    {
+      "library": "libicudata_sv_apple.so",
+      "git_blob": "ab317f62d00306cbcce6d4f491c742c4ad09ff24",
+      "sha256": "917f6350cba18463f0fdd512592d3e5ba736d5e5280891a30cbb9194416edf37",
+      "bytes": 10227296
+    },
+    {
+      "library": "libicui18n_sv_apple.so",
+      "git_blob": "850a5b8a9019ee8d8433331338c240a4fe01a0b5",
+      "sha256": "087c7e2c13ced438e590c4bc63304ad3bab42c010a3ce476de0173de4e8cef1b",
+      "bytes": 2512592
+    },
+    {
+      "library": "libicuuc_sv_apple.so",
+      "git_blob": "39cea1f0e412ee39fb2fd47abfc65ff4f2ea4b3c",
+      "sha256": "2fe83aafab3425f6de62c2fda9fc98c8d1e4d545d2d952f0efef1a568489f41d",
+      "bytes": 1671848
+    },
+    {
+      "library": "libmedialibrarycore.so",
+      "git_blob": "e93d7de06eab4a7c56c9a5428cea0291032897b4",
+      "sha256": "fc183df2222641fbf5799c21ccdec3356b7bc3d78fd824ccfdf653a2057a0122",
+      "bytes": 13846704
+    },
+    {
+      "library": "libmediaplatform.so",
+      "git_blob": "a512a5c3166d9b08e88bcf5d21c1f325336176d0",
+      "sha256": "e1771933e161c6dda1eb252937e808b1d380b5f6da139131b5db1e938b1d6bfa",
+      "bytes": 2859200
+    },
+    {
+      "library": "libstoreservicescore.so",
+      "git_blob": "6d0d1a52265896728db508db48531ccfe2571ae2",
+      "sha256": "9b5f87a6b1309819edfdeb7e7b83fac8c07b998ccc19b29d1c0cbaafbc830058",
+      "bytes": 2541184
+    },
+    {
+      "library": "libwilhelm.so",
+      "git_blob": "6687a73cdc358bef16f17644851bfd40236b0917",
+      "sha256": "8418709da5ec21fae5dbfd73da7dce813d5b2635b7438a7346251392f27e769c",
+      "bytes": 280120
+    },
+    {
+      "library": "libxml2.so",
+      "git_blob": "7f336cdc25bd1f6c9eee70e63b669c9811357e4a",
+      "sha256": "511fab051cbb0123345fc0d8e4b703366d2783570c983ce122e1cb55138d4d0e",
+      "bytes": 2273232
+    },
+    {
+      "library": "libz.so",
+      "git_blob": "ca9fab886fa62d4f8df9bb65702cce1b70f040a3",
+      "sha256": "26f0f06e40b212bb55f17eb4df812438b3e993e6485f6267bdd4225d2dfda8e1",
+      "bytes": 116296
+    }
+  ],
+  "upstream_source_path": "rootfs/system/lib64/"
+}

@@ -1,4 +1,4 @@
-// Public FPS certificate chain, copied unchanged from the lite import.h.
+// Public FPS certificate chain, copied unchanged from the historical import.h.
 #pragma once
 inline constexpr const char* fairplayCertificate =
     "MIIEzjCCA7agAwIBAgIIAXAVjHFZDjgwDQYJKoZIhvcNAQEFBQAwfzELMAkGA1UEBhMCVVMxEz"

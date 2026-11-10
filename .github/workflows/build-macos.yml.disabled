@@ -1,0 +1,46 @@
+# Retained for reference. Restore the .yml extension and enable in GitHub to run.
+name: Native macOS
+
+on:
+  push:
+    branches: [lite]
+  pull_request:
+    branches: [lite]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build-and-verify:
+    name: Build and verify Apple Silicon app
+    runs-on: macos-15
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Verify native host
+        run: test "$(uname -m)" = arm64
+
+      - name: Run native and HTTP regressions
+        run: ./script/build_and_run.sh --verify
+
+      - name: Build native desktop app
+        run: ./script/build_and_run.sh --app-build
+
+      - name: Verify app signature
+        run: codesign --verify --deep --strict "build/native-poc/Native Music Wrapper.app"
+
+      - name: Archive native app
+        run: >-
+          ditto -c -k --sequesterRsrc --keepParent
+          "build/native-poc/Native Music Wrapper.app"
+          build/native-poc/NativeMusicWrapper-macos-arm64.zip
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: NativeMusicWrapper-macos-arm64
+          path: |
+            build/native-poc/NativeMusicWrapper-macos-arm64.zip
+            LICENSE
+          if-no-files-found: error

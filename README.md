@@ -7,8 +7,7 @@ executes the Android ARM64 libraries directly in a macOS process.
 
 - Apple Silicon Mac running macOS 15 or later.
 - Xcode command-line tools, including Swift and Clang.
-- Python 3 and Git.
-- This repository's full Git history, which supplies the pinned ARM64 libraries.
+- Python 3. The 17 required ARM64 libraries are included in `native/macos/assets/`.
 
 QEMU, Docker, a Linux VM, an Android NDK, and a rooted Android device are not
 required. No additional runtime packages need to be installed.
@@ -92,10 +91,15 @@ CMake is optional. The commands above produce the same desktop app under
 ## Project history
 
 This project derives from the original wrapper-lite project.
-The inherited Linux-wrapper instructions and workflow are archived under
-[`legacy/`](legacy/README.md); they are not part of the macOS build or CI.
-The former QEMU launcher, guest-build scripts, and packaging jobs have been removed;
-Git history retains their previous versions.
+This checkout contains the native macOS implementation, its build tools, and
+regression checks. The former Linux/Docker/QEMU code, launchers, workflows, and
+working-tree root filesystem have been removed; Git history retains them.
+The build validates and copies the 17 required ARM64 libraries directly from
+`native/macos/assets/` on this branch. No other branch, Git history, or `rootfs/`
+directory is needed; an ordinary source archive can build the native app.
+The native GitHub workflow is disabled and retained as
+`.github/workflows/build-macos.yml.disabled`; local builds and verification remain
+available through `script/build_and_run.sh`.
 
 ## License
 

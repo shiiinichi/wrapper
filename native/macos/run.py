@@ -38,13 +38,12 @@ def main() -> int:
     parser.add_argument("--binary", type=Path, default=BUILD / "wrapper-native-poc")
     parser.add_argument("--assets", type=Path, default=BUILD / "assets")
     parser.add_argument("--report", type=Path, default=BUILD / "report.json")
-    parser.add_argument("--inspect-baseline", action="store_true", help="also inspect the original ELF-only dependency graphs")
     args = parser.parse_args()
     if platform.system() != "Darwin" or platform.machine() != "arm64":
         parser.error("run on native arm64 macOS; Rosetta/Linux/QEMU are not this experiment")
     manifest = json.loads((args.assets / "manifest.json").read_text())
     report = {"platform": platform.platform(), "asset_source_commit": manifest["source_commit"],
-              "native_probes": {}, "apple_initialization": {}, "service_bootstrap": {}, "authentication_preflight": {}, "apple_library_inspection": {}}
+              "native_probes": {}, "apple_initialization": {}, "service_bootstrap": {}, "authentication_preflight": {}}
     for target in ["zlib", "blocks"]:
         result = invoke(args.binary, args.assets, "--probe", target)
         report["native_probes"][target] = result
@@ -78,22 +77,10 @@ def main() -> int:
     print(f"Native authentication callback: {'PASS' if result.get('ok') else 'FAIL'}; cancelled before credentials are submitted")
     if not result.get("ok"):
         print("  " + str(result.get("error", result.get("stderr", "authentication preflight failed"))))
-    baseline = ["libCoreADI.so", "libCoreLSKD.so", "libstoreservicescore.so", "libandroidappmusic.so"] if args.inspect_baseline else []
-    for name in baseline:
-        result = invoke(args.binary, args.assets, "--inspect", name)
-        report["apple_library_inspection"][name] = result
-        loader = result.get("loader") or {}
-        images = loader.get("images", [])
-        missing = sum(len(image["missing_symbols"]) for image in images)
-        guards = sum(len(image["guarded_symbols"]) for image in images)
-        mixed = sum(image["mixed_write_execute_pages"] for image in images)
-        print(f"ELF-only baseline {name}: {len(images)} mapped images; {missing} unresolved, {guards} guarded imports; {mixed} W/X page conflicts")
-        if not result.get("ok"):
-            print("  " + str(result.get("error", "inspection failed")))
     args.report.parent.mkdir(parents=True, exist_ok=True)
     args.report.write_text(json.dumps(report, indent=2) + "\n")
     print(f"Report: {args.report}")
-    results = [*report["native_probes"].values(), *report["apple_initialization"].values(), report["service_bootstrap"], report["authentication_preflight"], *report["apple_library_inspection"].values()]
+    results = [*report["native_probes"].values(), *report["apple_initialization"].values(), report["service_bootstrap"], report["authentication_preflight"]]
     return 0 if all(result.get("ok") and result.get("exit_code") == 0 for result in results) else 1
 
 
