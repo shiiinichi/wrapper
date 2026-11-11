@@ -1,6 +1,5 @@
 """Apple web requests using tokens issued by the native Android library."""
 import base64
-import gzip
 import json
 import re
 import ssl
@@ -8,12 +7,36 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+import zlib
 
 
 class ApiError(Exception):
     def __init__(self, code, message):
         super().__init__(message)
         self.code = code
+
+
+class SameOriginHTTPSRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, request, response, code, message, headers, newurl):
+        old, new = urllib.parse.urlsplit(request.full_url), urllib.parse.urlsplit(newurl)
+        if (new.scheme != "https" or new.hostname != old.hostname
+                or (new.port or 443) != (old.port or 443) or new.username or new.password):
+            raise ApiError(502, "Apple redirected outside the trusted HTTPS origin")
+        return super().redirect_request(request, response, code, message, headers, newurl)
+
+
+def bounded_gzip(raw, limit=32 * 1024 * 1024):
+    result = bytearray()
+    while raw:
+        decoder = zlib.decompressobj(16 + zlib.MAX_WBITS)
+        part = decoder.decompress(raw, limit - len(result) + 1)
+        if len(part) > limit - len(result):
+            raise ApiError(502, "Apple response is too large")
+        if not decoder.eof:
+            raise ApiError(502, "Apple returned invalid gzip")
+        result.extend(part)
+        raw = decoder.unused_data.lstrip(b"\0")
+    return bytes(result)
 
 
 def line_lyrics(ttml):
@@ -31,6 +54,7 @@ class AppleWebApi:
         self.developer_time = 0
         context = ssl.create_default_context(cafile="/etc/ssl/cert.pem")
         self.opener = urllib.request.build_opener(urllib.request.ProxyHandler({}),
+                                                  SameOriginHTTPSRedirect(),
                                                   urllib.request.HTTPSHandler(context=context))
 
     def fetch(self, url, headers=None, body=None):
@@ -49,14 +73,14 @@ class AppleWebApi:
                 if len(raw) > 16 * 1024 * 1024:
                     raise ApiError(502, "Apple response is too large")
                 if response.headers.get("Content-Encoding") == "gzip":
-                    raw = gzip.decompress(raw)
+                    raw = bounded_gzip(raw)
                 if len(raw) > 32 * 1024 * 1024:
                     raise ApiError(502, "Apple response is too large")
                 return raw.decode("utf-8")
         except urllib.error.HTTPError as error:
             # Do not expose signed request URLs or Apple account response bodies.
             raise ApiError(502, "Apple returned HTTP " + str(error.code)) from None
-        except (urllib.error.URLError, TimeoutError, OSError, ValueError):
+        except (urllib.error.URLError, TimeoutError, OSError, ValueError, zlib.error):
             raise ApiError(502, "Apple network request failed") from None
 
     def web_developer_token(self):

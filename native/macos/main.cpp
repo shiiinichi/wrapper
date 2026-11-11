@@ -4,6 +4,7 @@
 #include "services.h"
 #include "authentication.h"
 #include "native_api.h"
+#include "security_selftest.h"
 
 #if !defined(__APPLE__) || !defined(__aarch64__)
 #error "This proof of concept must be compiled as a native arm64 macOS executable."
@@ -17,6 +18,7 @@
 #include <stdexcept>
 #include <string>
 #include <sys/resource.h>
+#include <sys/stat.h>
 #include <vector>
 
 using native_poc::Loader;
@@ -27,6 +29,7 @@ namespace {
 
 template <typename Function> Function function(Loader& loader, const std::string& library, const char* name) {
     void* pointer = loader.symbol(library, name);
+    if (loader.nativeHostModules().count(library)) return reinterpret_cast<Function>(pointer);
     for (const auto& image : loader.images())
         if (image->report.library == library && image->executableAddress(reinterpret_cast<uintptr_t>(pointer)))
             return reinterpret_cast<Function>(pointer);
@@ -39,7 +42,7 @@ void require(bool condition, const char* message) {
 
 std::string probeZlib(Loader& loader) {
     constexpr const char* library = "libz.so";
-    loader.load(library);
+    loader.loadHostLibrary(library);
     loader.relocate();
     loader.prepareExecution();
     loader.initialize();
@@ -151,6 +154,7 @@ int main(int argc, char** argv) {
             } else throw std::runtime_error("unknown or incomplete argument: " + arg);
         }
         if (assets.empty() || mode.empty()) throw std::runtime_error("--assets and one operation are required");
+        umask(0077); // SDK databases, WALs and account state are owner-only.
         loader = std::make_unique<Loader>(assets, apple_profile);
         if (mode == "--decryption-worker" && apple_profile) {
             native_poc::nativeDecryptionWorker(*loader, data_directory);
@@ -162,6 +166,7 @@ int main(int argc, char** argv) {
             result = native_poc::nativeApi(*loader, data_directory, library, adam_id, key_uri);
         } else if (mode == "--probe") {
             if (library == "zlib") result = probeZlib(*loader);
+            else if (library == "security-abi") result = native_poc::probeSecurityAbi(*loader);
             else if (library == "blocks") result = probeBlocks(*loader);
             else if (library == "coreadi-jni" && apple_profile) result = native_poc::probeAppleJni(*loader, "libCoreADI.so");
             else if (library == "lskd-jni" && apple_profile) result = native_poc::probeAppleJni(*loader, "libCoreLSKD.so");

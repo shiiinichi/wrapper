@@ -13,9 +13,8 @@ SOURCE = Path(__file__).resolve().parent / "assets"
 NATIVE_LIBRARIES = frozenset({
     "libBlocksRuntime.so", "libCoreADI.so", "libCoreFP.so", "libCoreLSKD.so",
     "libOpenSLES.so", "libandroidappmusic.so", "libc++_shared.so", "libdaapkit.so",
-    "libicudata_sv_apple.so", "libicui18n_sv_apple.so", "libicuuc_sv_apple.so",
     "libmedialibrarycore.so", "libmediaplatform.so", "libstoreservicescore.so",
-    "libwilhelm.so", "libxml2.so", "libz.so",
+    "libwilhelm.so",
 })
 
 

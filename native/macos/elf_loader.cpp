@@ -85,6 +85,45 @@ const std::set<std::string> kShimLibraries = {
     "libc.so", "libm.so", "libdl.so", "liblog.so", "libstdc++.so"
 };
 
+const std::map<std::string, std::string> kHostLibraries = {
+    {"libCoreFoundation.so", "/System/Library/Frameworks/CoreFoundation.framework/CoreFoundation"},
+    {"libdispatch.so", "/usr/lib/system/libdispatch.dylib"},
+    {"libBlocksRuntime.so", "/usr/lib/system/libsystem_blocks.dylib"},
+    {"libcurl.so", "/usr/lib/libcurl.4.dylib"},
+    {"libz.so", "/usr/lib/libz.1.dylib"},
+    {"libxml2.so", "/usr/lib/libxml2.2.dylib"},
+    {"libicuuc_sv_apple.so", "/usr/lib/libicucore.A.dylib"},
+    {"libicui18n_sv_apple.so", "/usr/lib/libicucore.A.dylib"},
+    {"libicudata_sv_apple.so", "/usr/lib/libicucore.A.dylib"},
+};
+
+bool hostOwns(const std::string& library, const std::string& name) {
+    // Only reviewed fixed-argument C interfaces cross the platform ABI. In
+    // particular, never resolve Android ICU C++ objects into Apple's ICU.
+    if (library == "libz.so") {
+        if (name == "gzprintf" || name == "gzvprintf") return false;
+        return name.rfind("inflate", 0) == 0 || name.rfind("deflate", 0) == 0 ||
+            name.rfind("gz", 0) == 0 || name.rfind("crc32", 0) == 0 || name.rfind("adler32", 0) == 0 ||
+            name == "compress" || name == "compress2" || name == "compressBound" ||
+            name == "uncompress" || name == "uncompress2" || name == "zlibVersion" || name == "zError";
+    }
+    if (library == "libxml2.so") {
+        const std::string reviewed = "|xmlParserVersion|xmlDictCreate|xmlDictLookup|xmlDictFree|";
+        return reviewed.find("|" + name + "|") != std::string::npos;
+    }
+    if (library.rfind("libicu", 0) == 0) {
+        const std::string reviewed = "|u_getVersion|u_errorName|u_isalnum|u_ispunct|u_strFromUTF8|u_strFromWCS|"
+            "u_strToUTF8|u_strToWCS|u_tolower|u_isUUppercase|uiter_setString|uloc_setKeywordValue|"
+            "ucol_close|ucol_getAttribute|ucol_getSortKey|ucol_getStrength|ucol_getVersion|ucol_nextSortKeyPart|"
+            "ucol_open|ucol_setAttribute|ucol_setStrength|utrans_close|utrans_openU|utrans_transUChars|"
+            "ubrk_close|ubrk_getRuleStatus|ubrk_next|ubrk_open|ubrk_setText|ubrk_isBoundary|"
+            "usearch_close|usearch_first|usearch_getMatchedLength|usearch_last|usearch_next|usearch_openFromCollator|"
+            "usearch_setPattern|usearch_setText|utext_close|utext_moveIndex32|utext_next32|utext_openUChars|utext_setNativeIndex|";
+        return reviewed.find("|" + name + "|") != std::string::npos;
+    }
+    return false;
+}
+
 template <typename Range> void stringArray(std::ostream& out, const Range& values) {
     out << '[';
     bool first = true;
@@ -453,6 +492,17 @@ void Image::protect() {
 
 Loader::Loader(std::filesystem::path assets, bool apple_profile) : assets_(std::move(assets)), apple_profile_(apple_profile) {}
 
+void Loader::loadHostLibrary(const std::string& name) {
+    auto path = kHostLibraries.find(name);
+    if (path == kHostLibraries.end()) throw std::runtime_error("unreviewed native host library: " + name);
+    if (!host_modules_.count(name)) {
+        auto module = dlopen(path->second.c_str(), RTLD_LOCAL | RTLD_NOW);
+        if (!module) throw std::runtime_error("native host library failed: " + name);
+        host_modules_[name] = module;
+    }
+    system_shims_.insert(name);
+}
+
 std::set<std::string> Loader::nativeHostModules() const {
     std::set<std::string> names;
     for (const auto& entry : host_modules_) names.insert(entry.first);
@@ -483,23 +533,8 @@ Image& Loader::load(const std::string& name) {
             std::to_string(result->report.mixed_write_execute_pages) + " host page(s)"});
     for (const auto& dependency : result->report.needed) {
         if (apple_profile_) {
-            static const std::map<std::string, std::string> native_modules = {
-                {"libCoreFoundation.so", "/System/Library/Frameworks/CoreFoundation.framework/CoreFoundation"},
-                {"libdispatch.so", "/usr/lib/system/libdispatch.dylib"},
-                {"libBlocksRuntime.so", "/usr/lib/system/libsystem_blocks.dylib"},
-                {"libcurl.so", "/usr/lib/libcurl.4.dylib"},
-                {"libandroid.so", ""}
-            };
-            auto native = native_modules.find(dependency);
-            if (native != native_modules.end()) {
-                if (native->second.empty()) { system_shims_.insert(dependency); continue; }
-                if (!host_modules_.count(dependency)) {
-                    void* module = dlopen(native->second.c_str(), RTLD_LOCAL | RTLD_LAZY);
-                    if (!module) throw std::runtime_error("native host module failed: " + dependency);
-                    host_modules_[dependency] = module;
-                }
-                system_shims_.insert(dependency); continue;
-            }
+            if (dependency == "libandroid.so") { system_shims_.insert(dependency); continue; }
+            if (kHostLibraries.count(dependency)) { loadHostLibrary(dependency); continue; }
         }
         if (kShimLibraries.count(dependency)) { system_shims_.insert(dependency); continue; }
         try { load(dependency); }
@@ -535,7 +570,7 @@ uintptr_t Loader::resolve(Image& image, const Symbol& symbol, const std::string&
                 (name.rfind("CF", 0) == 0 || name.rfind("_CF", 0) == 0 || name.rfind("__CF", 0) == 0 || name.rfind("kCF", 0) == 0) :
                 module.first == "libdispatch.so" ? (name.rfind("dispatch_", 0) == 0 || name.rfind("_dispatch_", 0) == 0) :
                 module.first == "libBlocksRuntime.so" ? (name.rfind("_Block_", 0) == 0 || name.rfind("_NSConcrete", 0) == 0) :
-                module.first == "libcurl.so" ? name.rfind("curl_", 0) == 0 : false;
+                module.first == "libcurl.so" ? name.rfind("curl_", 0) == 0 : hostOwns(module.first, name);
             // These interfaces take Darwin varargs/va_list; Android callers
             // need a separate adapter even though dyld exports the same name.
             if (name == "CFLog" || name.find("WithFormat") != std::string::npos ||
@@ -675,6 +710,11 @@ void Loader::initialize() {
 }
 
 void* Loader::symbol(const std::string& library, const std::string& name) const {
+    auto native = host_modules_.find(library);
+    if (native != host_modules_.end() && hostOwns(library, name)) {
+        if (auto address = dlsym(native->second, name.c_str())) return address;
+        throw std::runtime_error("native host symbol is unavailable: " + name);
+    }
     auto found = by_name_.find(library);
     if (found == by_name_.end()) throw std::runtime_error("ELF image is not loaded: " + library);
     void* address = found->second->exported(name);

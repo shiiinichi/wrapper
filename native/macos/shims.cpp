@@ -77,7 +77,14 @@ GUARDS(DEFINE_GUARD)
 #undef DEFINE_GUARD
 
 // An ELF canary is a data import. This address remains valid for the process.
-uint64_t stack_canary = 0x7250d94a3c81e60bULL;
+uint64_t stack_canary = [] {
+    uint64_t value;
+    do {
+        arc4random_buf(&value, sizeof(value));
+        value &= ~uint64_t(0xff); // Retain a NUL byte as in the native canary.
+    } while (!value);
+    return value;
+}();
 
 } // namespace
 
