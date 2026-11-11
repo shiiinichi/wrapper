@@ -13,7 +13,8 @@ build dependency.
 
 ## Run and verify
 
-Requires Apple Silicon, Xcode command-line tools, and Python 3. The 17 required
+Requires Apple Silicon, Xcode command-line tools, Python 3, and current macOS
+security updates. The 12 required
 Android ARM64 libraries are included directly in `native/macos/assets/` on `lite`.
 A normal checkout or source archive contains everything needed to build; no
 other branch, Git history, Android root filesystem, or Android NDK is required.
@@ -65,14 +66,36 @@ Assets, SHA-256/Git-blob provenance (`manifest.json`), binaries, and evidence
 uses a fresh temporary directory there and removes it afterward. No existing
 wrapper account data is copied.
 
-Asset preparation reads the 17 required ARM64 libraries from
+Asset preparation reads the 12 required ARM64 libraries from
 `native/macos/assets/`, including the native runtime dependencies and the
-independent zlib/Blocks checks. It validates their architecture, sizes, and SHA-256
+independent Blocks check. It validates their architecture, sizes, and SHA-256
 checksums against the included manifest. Original commit, path, and blob IDs are
 recorded only for provenance; the build never reads or fetches Git objects.
-Unused Android platform libraries are omitted.
+Unused Android platform libraries are omitted. The obsolete Android zlib 1.2.8,
+libxml2 2.9.9 and ICU 57.1 copies are removed; their dependency names resolve to
+maintained macOS libraries through reviewed C interfaces. The security ABI probe
+checks the CVE-2022-37434 gzip-header and CVE-2023-29469 XML-dictionary conditions,
+the system ICU interface, and fresh process-specific stack canaries.
+New SDK account files use owner-only permissions. Apple web requests reject
+cross-origin redirects and bound gzip output during decompression. The public
+HTTP routes, request/response formats, default port and desktop workflow remain
+unchanged.
 Previously generated, unchanged unused libraries are pruned using their old
 manifest hashes; caller-owned or modified files are preserved.
+
+## Reusing the native core
+
+`./script/build_and_run.sh --build` produces the standalone native executable
+and validated `build/native-poc/assets/`. The native core has no dependency on
+the desktop UI or Python HTTP adapter. Phonograph can bundle these artifacts or
+vendor the C++/header/assembly sources and the pinned asset manifest; its host
+adapter owns signing, sandbox inheritance and an app-private `--data-dir`.
+Use one owner for each profile at a time.
+
+The existing native `--api` operations and framed sample worker remain stable.
+The original HTTP adapter remains available for clients using the established
+HTTP contract. App-specific transport and account UI belong in the integrating
+application; this security patch adds no XPC service or app allowlist.
 
 ## Local HTTP API
 
@@ -238,10 +261,10 @@ On the development Mac (macOS 27.2, arm64, 16 KiB pages):
 | Target | Actual executed result |
 | --- | --- |
 | CoreADI / CoreLSKD | Each real `JNI_OnLoad` returns JNI 1.6 |
-| StoreServicesCore | 64 initializers return; 73 including dependencies |
+| StoreServicesCore | 64 initializers return; 72 including dependencies |
 | MediaPlatform | 7 initializers return |
 | AndroidAppMusic | 91 initializers return |
-| Full Music graph | 373 initializers return, including 209 in MediaLibraryCore |
+| Full Music graph | 372 initializers return, including 209 in MediaLibraryCore |
 | Device identity | FootHill/DeviceGUID configuration returns error code 0; `isConfigured()` is true |
 | RequestContext | Real factory and `init` return; error code 0; manager returns the same context |
 | Local stores | Accounts, cookies, HTTP cache, and key/value SQLite databases are created and reopen successfully |
@@ -251,7 +274,7 @@ On the development Mac (macOS 27.2, arm64, 16 KiB pages):
 
 The pinned CoreADI/CoreLSKD JNI entry points do not request a JNI environment or
 register methods; the report records zero calls/registrations. Unsupported JNI
-functions terminate the child. The independent Android zlib round-trip/CRC and
+functions terminate the child. The independent system-zlib round-trip/CRC and
 Blocks-to-macOS callback tests also remain.
 
 **The default service probe is bootstrap before sign-in.** It does not read
@@ -283,8 +306,8 @@ embedding remain unimplemented. Other initializer probes use ordinary exit.
 The explicit `--apple-profile`:
 
 * Executes original ELF code for Music, StoreServicesCore, MediaPlatform,
-  MediaLibraryCore, CoreADI/CoreFP/CoreLSKD, ICU, Android libc++, XML, and zlib.
-* Supplies macOS CoreFoundation, dispatch, Blocks, and libcurl modules. Binding
+  MediaLibraryCore, CoreADI/CoreFP/CoreLSKD and Android libc++.
+* Supplies macOS CoreFoundation, dispatch, Blocks, libcurl, zlib, XML and ICU C interfaces. Binding
   stays within each module's symbol family so dependency libc exports cannot
   capture guest destructor registration, pthreads, or stdio. CoreFoundation string formatting translates object/scalar/vector/stack
   arguments and positional formats, including Android va_list input. Binary128
@@ -366,24 +389,29 @@ unchanged. The helper uses ordinary local ad-hoc signing.
 
 ## Evidence and tests
 
-Latest local validation: **2026-11-10**, after removal of the legacy
-source/root filesystem and inclusion of the 17 required libraries in the native
-source tree. The full native checks also passed from an ordinary source copy
-without `.git` or `rootfs/`, with the `git` command explicitly disabled.
+Latest local validation: **2026-11-11**, after removal of the obsolete
+zlib/XML/ICU copies, randomized stack canaries, private account-file permissions,
+and redirect/decompression hardening. The original HTTP contract and desktop
+sources are retained. Asset preparation also works from an ordinary source copy
+without `.git` or `rootfs/`.
 
 | Suite | Passing tests |
 | --- | ---: |
-| Native loader and ABI | 34 |
+| Native loader, ABI and security | 36 |
 | HTTP API, profile storage, and packaging | 17 |
 | Native sample worker | 8 |
-| Vendored native asset preparation | 6 |
-| **Total** | **65** |
+| Vendored native asset preparation | 8 |
+| Upstream redirect/decompression safeguards | 4 |
+| **Total** | **73** |
 
-The native desktop build and signature verification also passed. The relaunched
-server reported a saved account and native sample-decryption support. Live ALAC,
-AAC, and EC-3 sample batches matched the reference bytes after the cleanup;
-these checks did not start audio playback. GitHub Actions remains disabled, so
-these are local verification results.
+The original desktop package builds and passes strict signature verification.
+The native executable and assets also bootstrap from a temporary directory
+outside the checkout, and a real SDK-backed HTTP `/status` request preserves
+the original headers and response format using a fresh unsigned-in profile.
+
+Earlier saved-account validation covered ALAC, AAC and EC-3 sample batches
+without audio playback. Those account-dependent checks are separate from this
+security regression suite. GitHub Actions remains disabled.
 
 `build/native-poc/report.json` records constructor/JNI results, service state,
 TLS adapter counts/sizes, original/effective mixed-page counts, bias offsets,

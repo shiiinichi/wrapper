@@ -41,6 +41,7 @@ xcrun clang++ -arch arm64 -std=c++17 -O1 -g -Wall -Wextra -Werror \
   "$ROOT_DIR/native/macos/posix_bridge.cpp" \
   "$ROOT_DIR/native/macos/network_bridge.cpp" \
   "$ROOT_DIR/native/macos/sqlite_bridge.cpp" \
+  "$ROOT_DIR/native/macos/security_selftest.cpp" \
   "$ROOT_DIR/native/macos/guest_call.S" \
   -lcurl -lsqlite3 -framework CoreFoundation -o "$APP_BINARY"
 
@@ -73,6 +74,7 @@ case "$MODE" in
     python3 "$ROOT_DIR/native/macos/test_http_server.py"
     python3 "$ROOT_DIR/native/macos/test_native_decryption.py"
     python3 "$ROOT_DIR/native/macos/test_assets.py"
+    python3 "$ROOT_DIR/native/macos/test_security.py"
     ;;
 esac
 # Logs and telemetry are the bounded probe's JSON report and stderr. There is

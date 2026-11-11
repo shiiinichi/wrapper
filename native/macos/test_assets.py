@@ -96,6 +96,25 @@ class NativeAssetTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "AArch64 ELF64"):
             self.prepare()
 
+    def test_retired_dependencies_cannot_be_reintroduced_via_the_manifest(self):
+        self.manifest["files"].append(self.entry("libz.so", b"obsolete"))
+        (self.source / "libz.so").write_bytes(b"obsolete")
+        self.write_manifest()
+        with self.assertRaisesRegex(ValueError, "unused libraries"):
+            self.prepare()
+
+    def test_previously_generated_obsolete_dependencies_are_removed(self):
+        self.destination.mkdir()
+        names = {"libz.so", "libxml2.so", "libicuuc_sv_apple.so", "libicui18n_sv_apple.so", "libicudata_sv_apple.so"}
+        previous = {"files": []}
+        for name in names:
+            data = ("obsolete-" + name).encode()
+            (self.destination / name).write_bytes(data)
+            previous["files"].append(self.entry(name, data))
+        (self.destination / "manifest.json").write_text(json.dumps(previous))
+        self.prepare()
+        self.assertFalse(names & {path.name for path in self.destination.iterdir()})
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

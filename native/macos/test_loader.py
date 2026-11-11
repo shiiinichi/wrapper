@@ -98,7 +98,8 @@ class NativeLoaderTests(unittest.TestCase):
         images = {image["library"]: image for image in result["loader"]["images"]}
         self.assertEqual(images["libandroidappmusic.so"]["constructors_called"], 91)
         self.assertEqual(images["libmedialibrarycore.so"]["constructors_called"], 209)
-        self.assertEqual(sum(image["constructors_called"] for image in images.values()), 373)
+        self.assertEqual(sum(image["constructors_called"] for image in images.values()), 372)
+        self.assertFalse({"libz.so", "libxml2.so", "libicuuc_sv_apple.so", "libicui18n_sv_apple.so", "libicudata_sv_apple.so"} & images.keys())
         self.assertTrue(result["loader"]["constructors_initialized"])
         self.assertTrue(images["libOpenSLES.so"]["data_only"])
         self.assertTrue(images["libwilhelm.so"]["data_only"])
@@ -206,6 +207,18 @@ class NativeLoaderTests(unittest.TestCase):
         self.assertTrue(result["result"]["profile_identity_persistent"])
         self.assertFalse(result["result"]["credentials_submitted"])
 
+    def test_new_native_profile_files_are_owner_only(self):
+        with tempfile.TemporaryDirectory(prefix="native-profile-permissions-") as temp:
+            process = self.call("--api", "status", apple_profile=True, data_directory=temp)
+            result = self.result(process)
+            self.assertEqual(process.returncode, 0, result)
+            self.assertTrue(result["ok"], result)
+            self.assertTrue(list(Path(temp).glob("*.sqlitedb")))
+            self.assertEqual(Path(temp).stat().st_mode & 0o777, 0o700)
+            for path in Path(temp).iterdir():
+                if path.is_file():
+                    self.assertEqual(path.stat().st_mode & 0o777, 0o600, path.name)
+
     def test_login_prompt_cancel_returns_nonzero_without_success(self):
         with tempfile.TemporaryDirectory(prefix="native-auth-cancel-") as temp:
             script = Path(temp) / "cancel.applescript"
@@ -290,14 +303,14 @@ class NativeLoaderTests(unittest.TestCase):
         self.assertTrue(process.stdout, process.stderr)
         return json.loads(process.stdout)
 
-    def mutated(self, change, mode="--inspect", source="libz.so"):
+    def mutated(self, change, mode="--inspect", source="libBlocksRuntime.so"):
         fixture = ElfFixture(self.assets / source)
         change(fixture)
         with tempfile.TemporaryDirectory(prefix="elf-fixture-") as temp:
             (Path(temp) / source).write_bytes(fixture.data)
             return self.call(mode, source, Path(temp))
 
-    def test_android_zlib_executes_and_round_trips(self):
+    def test_system_zlib_executes_and_round_trips_without_a_bundled_copy(self):
         process = self.call("--probe", "zlib")
         result = self.result(process)
         self.assertEqual(process.returncode, 0, result)
@@ -305,9 +318,17 @@ class NativeLoaderTests(unittest.TestCase):
         self.assertTrue(result["result"]["round_trip"])
         self.assertTrue(result["loader"]["execution_prepared"])
         self.assertTrue(result["loader"]["constructors_initialized"])
-        # This real ELF has an inaccessible inter-segment gap. Cache flushing
-        # must not touch that gap; doing so produces SIGBUS on Apple Silicon.
-        self.assertEqual(result["loader"]["images"][0]["mixed_write_execute_pages"], 0)
+        self.assertIn("libz.so", result["loader"]["native_host_libraries"])
+        self.assertEqual(result["loader"]["images"], [])
+
+    def test_security_regressions_use_patched_host_libraries_and_fresh_canaries(self):
+        results = [self.result(self.call("--probe", "security-abi")) for _ in range(2)]
+        for result in results:
+            self.assertTrue(result["ok"], result)
+            for flag in ("gzip_header_bounds", "xml_empty_dictionary", "stack_canary_matches_tls"):
+                self.assertTrue(result["result"][flag])
+            self.assertEqual(result["loader"]["images"], [])
+        self.assertNotEqual(results[0]["result"]["stack_canary_fingerprint"], results[1]["result"]["stack_canary_fingerprint"])
 
     def test_android_blocks_calls_native_callbacks_and_retains(self):
         process = self.call("--probe", "blocks")

@@ -51,24 +51,6 @@
       "bytes": 201120
     },
     {
-      "library": "libicudata_sv_apple.so",
-      "git_blob": "ab317f62d00306cbcce6d4f491c742c4ad09ff24",
-      "sha256": "917f6350cba18463f0fdd512592d3e5ba736d5e5280891a30cbb9194416edf37",
-      "bytes": 10227296
-    },
-    {
-      "library": "libicui18n_sv_apple.so",
-      "git_blob": "850a5b8a9019ee8d8433331338c240a4fe01a0b5",
-      "sha256": "087c7e2c13ced438e590c4bc63304ad3bab42c010a3ce476de0173de4e8cef1b",
-      "bytes": 2512592
-    },
-    {
-      "library": "libicuuc_sv_apple.so",
-      "git_blob": "39cea1f0e412ee39fb2fd47abfc65ff4f2ea4b3c",
-      "sha256": "2fe83aafab3425f6de62c2fda9fc98c8d1e4d545d2d952f0efef1a568489f41d",
-      "bytes": 1671848
-    },
-    {
       "library": "libmedialibrarycore.so",
       "git_blob": "e93d7de06eab4a7c56c9a5428cea0291032897b4",
       "sha256": "fc183df2222641fbf5799c21ccdec3356b7bc3d78fd824ccfdf653a2057a0122",
@@ -91,19 +73,14 @@
       "git_blob": "6687a73cdc358bef16f17644851bfd40236b0917",
       "sha256": "8418709da5ec21fae5dbfd73da7dce813d5b2635b7438a7346251392f27e769c",
       "bytes": 280120
-    },
-    {
-      "library": "libxml2.so",
-      "git_blob": "7f336cdc25bd1f6c9eee70e63b669c9811357e4a",
-      "sha256": "511fab051cbb0123345fc0d8e4b703366d2783570c983ce122e1cb55138d4d0e",
-      "bytes": 2273232
-    },
-    {
-      "library": "libz.so",
-      "git_blob": "ca9fab886fa62d4f8df9bb65702cce1b70f040a3",
-      "sha256": "26f0f06e40b212bb55f17eb4df812438b3e993e6485f6267bdd4225d2dfda8e1",
-      "bytes": 116296
     }
   ],
-  "upstream_source_path": "rootfs/system/lib64/"
+  "upstream_source_path": "rootfs/system/lib64/",
+  "host_dependencies": {
+    "libz.so": "/usr/lib/libz.1.dylib",
+    "libxml2.so": "/usr/lib/libxml2.2.dylib",
+    "libicuuc_sv_apple.so": "/usr/lib/libicucore.A.dylib",
+    "libicui18n_sv_apple.so": "/usr/lib/libicucore.A.dylib",
+    "libicudata_sv_apple.so": "/usr/lib/libicucore.A.dylib"
+  }
 }

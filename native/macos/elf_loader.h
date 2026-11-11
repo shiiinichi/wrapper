@@ -94,6 +94,7 @@ private:
 class Loader {
 public:
     explicit Loader(std::filesystem::path assets, bool apple_profile = false);
+    void loadHostLibrary(const std::string& name);
     Image& load(const std::string& name);
     void relocate();
     void prepareExecution();
