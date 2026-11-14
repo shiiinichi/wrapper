@@ -63,12 +63,22 @@ Responses preserve the original JSON envelope:
 | Endpoint | Method | Parameters |
 | --- | --- | --- |
 | `/status` | GET | Saved-account status, storefront regions, backend identity. |
+| `/artist` | GET | Artist `adamId`, optional two-letter `storefront` (default `us`). Returns catalog metadata and the artist logo. |
 | `/m3u8` | GET | `adamId`. |
 | `/key` | GET | `adamId`, `uri` from the enhanced HLS manifest. |
 | `/decrypt` | POST | Framed binary audio samples and the `X-Native-Context` handle from `/key`. |
 | `/lyrics` | GET | `adamId`; optional `language`, `syllable`, `script`. |
 | `/webplayback` | GET | `adamId`. |
 | `/license` | POST | JSON `adamId`, `challenge`, `uri`; optional `drm-type` (`wv` or `pr`). |
+
+To look up an artist without signing in:
+
+```sh
+curl 'http://127.0.0.1:12341/artist?adamId=1092859&storefront=ph'
+```
+
+`data.artistLogo.url` is a ready-to-use transparent PNG URL when Apple supplies
+a logo. An artist without one still returns their metadata, with `artistLogo: null`.
 
 The native key response supplies a versioned, opaque sample-decryption handle.
 Compatible clients send sample batches to `/decrypt`; a persistent ARM64 worker
