@@ -112,12 +112,23 @@ The desktop also verifies a per-server instance identifier before reporting read
 | Endpoint | Method | Parameters and behavior |
 | --- | --- | --- |
 | `/status` | GET | Native saved-account presence, storefront regions, and backend identity. |
+| `/artist` | GET | Artist `adamId` and optional two-letter `storefront` (default `us`). Public Apple Music artist profile and logo. |
 | `/m3u8` | GET | `adamId`; enhanced HLS from Apple's catalog using native-issued account tokens. |
 | `/key` | GET | `adamId`, `uri`; returns the native persistent key and an opaque sample-decryption context. |
 | `/decrypt` | POST | Binary sample batch; `X-Native-Context` from `/key`. Returns the same binary sample framing. |
 | `/lyrics` | GET | `adamId`; optional `language`, `syllable`, and `script`; preserves TTML localizations. |
 | `/webplayback` | GET | `adamId`; Apple web playback playlist using native-issued account tokens. |
 | `/license` | POST | JSON `adamId`, `challenge`, `uri`, optional `drm-type` (`wv` or `pr`). Requires a real player/CDM challenge. |
+
+`/artist` uses the public web developer token and works without a saved account.
+`data` contains `adamId`, `storefront`, `name`, `url` (Apple Music page),
+`genreNames`, `artwork` (Apple's portrait artwork object), `artistBio`, `origin`,
+`bornOrFormed`, `editorialNotes`, and `artistLogo`. Optional metadata fields can
+be null, and missing genres produce an empty array. Biography and editorial
+text retain Apple's markup. The logo object contains a ready-to-use PNG `url`,
+a PNG `urlTemplate` with `{w}` and `{h}` dimensions, and the source `width`
+and `height`. An artist without a logo returns `artistLogo: null`. An unknown
+artist in the selected storefront returns envelope code 404.
 
 The server uses bounded native child processes and serializes access to each
 profile. A child failure or timeout returns a JSON error while the HTTP process

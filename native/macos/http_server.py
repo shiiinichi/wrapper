@@ -23,6 +23,8 @@ from native_decryption import MAX_FRAME, NativeDecryption
 ROOT = Path(__file__).resolve().parents[2]
 BUILD = ROOT / "build/native-poc"
 PREFETCH = "skd://itunes.apple.com/P000000000/s1/e1"
+ROUTE_METHODS = {"/status": "GET", "/artist": "GET", "/m3u8": "GET", "/key": "GET",
+                 "/lyrics": "GET", "/webplayback": "GET", "/license": "POST", "/decrypt": "POST"}
 
 
 class NativeBackend:
@@ -121,6 +123,14 @@ class NativeBackend:
             raise ApiError(400, "missing adamId")
         if not re.fullmatch(r"[0-9]{1,19}", adam) or (adam == "0" and route != "/key") or int(adam) > 2**63 - 1:
             raise ApiError(400, "invalid adamId")
+        if route == "/artist":
+            adam = str(int(adam))
+            if adam == "0":
+                raise ApiError(400, "invalid adamId")
+            storefront = query.get("storefront", "us")
+            if not re.fullmatch(r"[A-Za-z]{2}", storefront):
+                raise ApiError(400, "invalid storefront")
+            return self.web.artist(adam, storefront.lower())
         if route == "/m3u8":
             with self.lock:
                 return self.web.enhanced_hls(adam)
@@ -211,10 +221,9 @@ class Handler(BaseHTTPRequestHandler):
             host = self.headers.get("Host", "").split(":", 1)[0]
             if host not in ("127.0.0.1", "localhost") or self.headers.get("Origin"):
                 raise ApiError(403, "Local clients only")
-            routes = {"/status", "/m3u8", "/key", "/lyrics", "/webplayback", "/license", "/decrypt"}
-            if route not in routes:
+            if route not in ROUTE_METHODS:
                 raise ApiError(404, "not found")
-            if (route in {"/license", "/decrypt"}) != (method == "POST"):
+            if method != ROUTE_METHODS[route]:
                 raise ApiError(405, "method not allowed")
             if self.headers.get("Transfer-Encoding"):
                 raise ApiError(400, "transfer encoding is unsupported")
@@ -255,7 +264,7 @@ class Handler(BaseHTTPRequestHandler):
         raw = binary if binary is not None and payload["code"] == 0 else json.dumps(payload, separators=(",", ":")).encode()
         milliseconds = (time.monotonic() - started) * 1000
         # Record a known endpoint name only, never arbitrary query/URI text.
-        timing_route = route if route in {"/status", "/m3u8", "/key", "/lyrics", "/webplayback", "/license", "/decrypt"} else "unknown"
+        timing_route = route if route in ROUTE_METHODS else "unknown"
         self.server.backend.record_timing(timing_route, method, payload["code"], milliseconds)
         try:
             # Keep the lite API's HTTP-200 / JSON-code contract.

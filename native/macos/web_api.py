@@ -3,6 +3,7 @@ import base64
 import json
 import re
 import ssl
+import threading
 import time
 import urllib.error
 import urllib.parse
@@ -14,6 +15,12 @@ class ApiError(Exception):
     def __init__(self, code, message):
         super().__init__(message)
         self.code = code
+
+
+class AppleHTTPError(ApiError):
+    def __init__(self, status):
+        super().__init__(502, "Apple returned HTTP " + str(status))
+        self.status = status
 
 
 class SameOriginHTTPSRedirect(urllib.request.HTTPRedirectHandler):
@@ -47,11 +54,37 @@ def line_lyrics(ttml):
                   lambda match: match[1] + re.sub(r" {2,}", " ", match[2]) + match[3], result)
 
 
+def artist_logo(editorial):
+    logo = editorial.get("musicContentColorLogoTrimmed") if isinstance(editorial, dict) else None
+    if not isinstance(logo, dict):
+        return None
+    url, width, height = logo.get("url"), logo.get("width"), logo.get("height")
+    if not isinstance(url, str) or not url.startswith("https://"):
+        return None
+    if type(width) is not int or width <= 0 or type(height) is not int or height <= 0:
+        return None
+    # Apple supplies a JPEG thumbnail template even when the original logo has transparency.
+    try:
+        parts = urllib.parse.urlsplit(url)
+        if not parts.hostname or parts.username is not None or parts.password is not None:
+            return None
+    except ValueError:
+        return None
+    path = parts.path.replace("{c}", "bb").replace("{f}", "png")
+    if not re.search(r"\.(?:png|jpe?g|webp|avif)$", path, re.IGNORECASE):
+        return None
+    path = path.rsplit(".", 1)[0] + ".png"
+    template = parts._replace(path=path).geturl()
+    return {"url": template.replace("{w}", str(width)).replace("{h}", str(height)),
+            "urlTemplate": template, "width": width, "height": height}
+
+
 class AppleWebApi:
     def __init__(self, token_provider):
         self.token_provider = token_provider
         self.developer = ""
         self.developer_time = 0
+        self.developer_lock = threading.Lock()
         context = ssl.create_default_context(cafile="/etc/ssl/cert.pem")
         self.opener = urllib.request.build_opener(urllib.request.ProxyHandler({}),
                                                   SameOriginHTTPSRedirect(),
@@ -79,13 +112,20 @@ class AppleWebApi:
                 return raw.decode("utf-8")
         except urllib.error.HTTPError as error:
             # Do not expose signed request URLs or Apple account response bodies.
-            raise ApiError(502, "Apple returned HTTP " + str(error.code)) from None
+            if error.fp is not None:
+                error.close()
+            raise AppleHTTPError(error.code) from None
         except (urllib.error.URLError, TimeoutError, OSError, ValueError, zlib.error):
             raise ApiError(502, "Apple network request failed") from None
 
     def web_developer_token(self):
-        if self.developer and time.monotonic() - self.developer_time < 86400:
+        with self.developer_lock:
+            if not self.developer or time.monotonic() - self.developer_time >= 86400:
+                self.developer = self.fetch_web_developer_token()
+                self.developer_time = time.monotonic()
             return self.developer
+
+    def fetch_web_developer_token(self):
         html = self.fetch("https://music.apple.com")
         script = re.search(r"/assets/index~[^/\s\"<>]+\.js", html)
         if not script:
@@ -96,8 +136,6 @@ class AppleWebApi:
                 encoded = candidate.split(".")[1]
                 claims = json.loads(base64.urlsafe_b64decode(encoded + "=" * (-len(encoded) % 4)))
                 if claims.get("iss") == "AMPWebPlay":
-                    self.developer = candidate
-                    self.developer_time = time.monotonic()
                     return candidate
             except (ValueError, UnicodeError):
                 continue
@@ -123,6 +161,33 @@ class AppleWebApi:
         if not isinstance(value, dict) or value.get("errors") or value.get("failureType"):
             raise ApiError(502, "Apple rejected the request")
         return value
+
+    def artist(self, adam, storefront):
+        url = ("https://amp-api.music.apple.com/v1/catalog/" + storefront + "/artists/" + adam
+               + "?extend=artistBio,origin,bornOrFormed,editorialArtwork")
+        headers = {"Authorization": "Bearer " + self.web_developer_token(), "Origin": "https://music.apple.com"}
+        try:
+            value = self.json_request(url, headers)
+        except AppleHTTPError as error:
+            if error.status == 404:
+                raise ApiError(404, "artist not found") from None
+            raise
+        artists = value.get("data")
+        if not isinstance(artists, list):
+            raise ApiError(502, "Apple returned an invalid artist")
+        if not artists:
+            raise ApiError(404, "artist not found")
+        artist = artists[0]
+        if not isinstance(artist, dict) or artist.get("type") != "artists" or artist.get("id") != adam:
+            raise ApiError(502, "Apple returned an invalid artist")
+        attributes = artist.get("attributes")
+        if not isinstance(attributes, dict) or not isinstance(attributes.get("name"), str) or not attributes["name"]:
+            raise ApiError(502, "Apple returned an invalid artist")
+        return {"adamId": adam, "storefront": storefront, "name": attributes["name"], "url": attributes.get("url"),
+                "genreNames": attributes.get("genreNames") or [], "artwork": attributes.get("artwork"),
+                "artistBio": attributes.get("artistBio"), "origin": attributes.get("origin"),
+                "bornOrFormed": attributes.get("bornOrFormed"), "editorialNotes": attributes.get("editorialNotes"),
+                "artistLogo": artist_logo(attributes.get("editorialArtwork"))}
 
     def lyrics(self, adam, language, syllable, script):
         tokens, developer = self.credentials()

@@ -11,6 +11,7 @@ import shutil
 import threading
 import unittest
 from unittest.mock import patch
+import urllib.error
 import urllib.request
 import xml.etree.ElementTree as ET
 
@@ -141,6 +142,84 @@ class NativeDispatchTests(unittest.TestCase):
     def tearDown(self):
         self.backend.close()
         self.directory.cleanup()
+
+    def test_http_artist_returns_metadata_and_transparent_logo_without_account(self):
+        root = "https://is1-ssl.mzstatic.com/image/thumb/Features/wordmark.png/"
+        portrait = {"width": 100, "height": 100, "url": "https://example.invalid/portrait/{w}x{h}bb.jpg"}
+        attributes = {"name": "Fixture Artist", "genreNames": ["Rock"], "url": "https://music.apple.com/ph/artist/42",
+                      "artistBio": "<p>Biography</p>", "origin": "Manila", "bornOrFormed": "1998",
+                      "artwork": portrait, "editorialNotes": {"short": "A note."}, "editorialArtwork": {
+                          "musicContentColorLogoTrimmed": {"url": root + "{w}x{h}bb.jpg", "width": 2880, "height": 268}}}
+        catalog = {"data": [{"type": "artists", "id": "42", "attributes": attributes}]}
+        server = NativeHTTPServer(("127.0.0.1", 0), self.backend)
+        thread = threading.Thread(target=server.serve_forever, kwargs={"poll_interval": 0.01}, daemon=True)
+        thread.start()
+        try:
+            with patch.object(self.backend.web, "web_developer_token", return_value="web-fixture"), \
+                 patch.object(self.backend.web, "fetch", return_value=json.dumps(catalog)) as fetch:
+                url = "http://127.0.0.1:" + str(server.server_port) + "/artist?adamId=42&storefront=PH"
+                with urllib.request.urlopen(url, timeout=3) as response:
+                    result = json.load(response)
+                self.assertEqual(result["code"], 0)
+                data = result["data"]
+                self.assertEqual((data["adamId"], data["storefront"]), ("42", "ph"))
+                for name in ("name", "genreNames", "url", "artistBio", "origin", "bornOrFormed", "editorialNotes", "artwork"):
+                    self.assertEqual(data[name], attributes[name])
+                self.assertEqual(data["artistLogo"], {"url": root + "2880x268bb.png", "urlTemplate": root + "{w}x{h}bb.png",
+                                                      "width": 2880, "height": 268})
+                requested, headers, body = fetch.call_args.args
+                parts = urllib.parse.urlsplit(requested)
+                self.assertEqual((parts.scheme, parts.netloc, parts.path),
+                                 ("https", "amp-api.music.apple.com", "/v1/catalog/ph/artists/42"))
+                self.assertEqual(set(urllib.parse.parse_qs(parts.query)["extend"][0].split(",")),
+                                 {"artistBio", "origin", "bornOrFormed", "editorialArtwork"})
+                self.assertEqual(headers, {"Origin": "https://music.apple.com", "Authorization": "Bearer web-fixture"})
+                self.assertIsNone(body)
+            timing = json.loads((self.backend.profile / "http-timings.jsonl").read_text())
+            self.assertEqual((timing["endpoint"], timing["code"]), ("/artist", 0))
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=2)
+
+    def test_artist_without_logo_preserves_the_profile_and_defaults_to_us(self):
+        attributes = {"name": "Fixture Artist", "artwork": {"url": "https://example.invalid/portrait.jpg"}}
+        catalog = {"data": [{"type": "artists", "id": "42", "attributes": attributes}]}
+        with patch.object(self.backend.web, "web_developer_token", return_value="web-fixture"), \
+             patch.object(self.backend.web, "json_request", return_value=catalog):
+            for editorial in (None, {"subscriptionHero": {"url": "https://example.invalid/hero.jpg"}},
+                              {"musicContentColorLogoTrimmed": {"url": "https://example.invalid/incomplete"}}):
+                with self.subTest(editorial=editorial):
+                    attributes["editorialArtwork"] = editorial
+                    data = self.backend.execute("/artist", {"adamId": "42"}, {})
+                    self.assertEqual((data["storefront"], data["name"]), ("us", "Fixture Artist"))
+                    self.assertIsNone(data["artistLogo"])
+                    self.assertIsNone(data["artistBio"])
+                    self.assertEqual(data["genreNames"], [])
+                    self.assertEqual(data["artwork"], attributes["artwork"])
+
+    def test_artist_distinguishes_not_found_from_invalid_or_failed_upstream(self):
+        url = "https://amp-api.music.apple.com/v1/catalog/us/artists/42"
+        with patch.object(self.backend.web, "web_developer_token", return_value="web-fixture"):
+            for code, expected in [(404, 404), (503, 502)]:
+                with self.subTest(status=code), patch.object(self.backend.web.opener, "open",
+                        side_effect=urllib.error.HTTPError(url, code, "fixture", {}, None)), self.assertRaises(ApiError) as error:
+                    self.backend.execute("/artist", {"adamId": "42"}, {})
+                self.assertEqual(error.exception.code, expected)
+            for payload, expected in [({"data": []}, 404), ({}, 502), ({"data": [None]}, 502),
+                                      ({"data": [{"type": "songs", "id": "42", "attributes": {"name": "Other"}}]}, 502)]:
+                with self.subTest(payload=payload), patch.object(self.backend.web, "json_request", return_value=payload), \
+                     self.assertRaises(ApiError) as error:
+                    self.backend.execute("/artist", {"adamId": "42"}, {})
+                self.assertEqual(error.exception.code, expected)
+
+    def test_artist_validates_its_id_and_storefront_before_contacting_apple(self):
+        with patch.object(self.backend.web, "artist", side_effect=AssertionError("unexpected catalog request")):
+            for query in ({}, {"adamId": "0"}, {"adamId": "000"}, {"adamId": "-7"}, {"adamId": str(2**63)},
+                          {"adamId": "42", "storefront": ""}, {"adamId": "42", "storefront": "../us"}):
+                with self.subTest(query=query), self.assertRaises(ApiError) as error:
+                    self.backend.execute("/artist", query, {})
+                self.assertEqual(error.exception.code, 400)
 
     def test_invalid_track_and_key_inputs_cannot_launch_native_workers(self):
         with patch.object(self.backend, "call", side_effect=AssertionError("unexpected native call")):
