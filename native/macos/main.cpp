@@ -3,6 +3,7 @@
 #include "abi_selftest.h"
 #include "services.h"
 #include "authentication.h"
+#include "auth_input.h"
 #include "native_api.h"
 #include "security_selftest.h"
 
@@ -19,6 +20,9 @@
 #include <string>
 #include <sys/resource.h>
 #include <sys/stat.h>
+#include <thread>
+#include <chrono>
+#include <unistd.h>
 #include <vector>
 
 using native_poc::Loader;
@@ -126,11 +130,19 @@ int main(int argc, char** argv) {
     std::unique_ptr<Loader> loader;
     std::string assets, mode, library, data_directory, prompt_script, adam_id, key_uri;
     bool apple_profile = false;
+    pid_t owner = 0;
     try {
         for (int i = 1; i < argc; ++i) {
             std::string arg = argv[i];
-            if ((arg == "--assets" || arg == "--data-dir" || arg == "--prompt-script" || arg == "--adam-id" || arg == "--key-uri" || arg == "--api" || arg == "--probe" || arg == "--inspect" || arg == "--initialize") && i + 1 < argc) {
+            if ((arg == "--owner-pid" || arg == "--assets" || arg == "--data-dir" || arg == "--prompt-script" || arg == "--adam-id" || arg == "--key-uri" || arg == "--api" || arg == "--probe" || arg == "--inspect" || arg == "--initialize") && i + 1 < argc) {
                 if (arg == "--assets") assets = argv[++i];
+                else if (arg == "--owner-pid") {
+                    std::string value = argv[++i];
+                    if (value.empty() || value.size() > 10 || !std::all_of(value.begin(), value.end(), [](char c) { return c >= '0' && c <= '9'; })) throw std::runtime_error("invalid owner process");
+                    auto number = std::stoll(value);
+                    if (number < 2 || number > INT32_MAX || getppid() != number) throw std::runtime_error("invalid owner process");
+                    owner = static_cast<pid_t>(number);
+                }
                 else if (arg == "--data-dir") data_directory = argv[++i];
                 else if (arg == "--prompt-script") prompt_script = argv[++i];
                 else if (arg == "--adam-id") adam_id = argv[++i];
@@ -149,15 +161,22 @@ int main(int argc, char** argv) {
                 std::cout << "usage: wrapper-native-poc --assets DIR [--apple-profile] [--probe NAME | --inspect LIB.so | --initialize LIB.so] [--data-dir DIR]\n"
                     "probes: zlib, blocks, coreadi-jni, lskd-jni, services, auth-preflight, auth-network, auth-status\n"
                     "interactive sign-in: ./script/build_and_run.sh --login\n"
-                    "native HTTP API: ./script/build_and_run.sh --serve\n";
+                    "native HTTP API: ./script/build_and_run.sh --serve\n"
+                    "embedded worker: --apple-profile --decryption-worker --data-dir DIR --owner-pid PID\n";
                 return 0;
             } else throw std::runtime_error("unknown or incomplete argument: " + arg);
         }
         if (assets.empty() || mode.empty()) throw std::runtime_error("--assets and one operation are required");
         umask(0077); // SDK databases, WALs and account state are owner-only.
+        if (owner) std::thread([owner] {
+            for (;;) {
+                if (getppid() != owner) std::_Exit(0);
+                std::this_thread::sleep_for(std::chrono::milliseconds(250));
+            }
+        }).detach();
         loader = std::make_unique<Loader>(assets, apple_profile);
         if (mode == "--decryption-worker" && apple_profile) {
-            native_poc::nativeDecryptionWorker(*loader, data_directory);
+            native_poc::nativeDecryptionWorker(*loader, data_directory, owner != 0);
             std::_Exit(0); // Keep ELF worker code mapped until process exit.
         }
         std::string result = "null";
@@ -181,6 +200,8 @@ int main(int argc, char** argv) {
                 result = authentication.evidence; operation_ok = authentication.authenticated;
             }
             else if (library == "auth-abi" && apple_profile) result = native_poc::probeAuthenticationAbi(*loader, data_directory);
+            else if (library == "auth-account-abi" && apple_profile) result = native_poc::probeAccountMetadataAbi(*loader, data_directory);
+            else if (library == "auth-input-pipe" && apple_profile) result = native_poc::probeAuthInputPipe();
             else if (library == "auth-status" && apple_profile) result = native_poc::authenticationStatus(*loader, data_directory);
             else if (library == "network-abi" && apple_profile) result = native_poc::probeNetworkAbi(assets);
             else if (library == "corefoundation-abi" && apple_profile) result = native_poc::probeCoreFoundationAbi(*loader);

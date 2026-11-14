@@ -1,4 +1,5 @@
 #include "auth_input.h"
+#include "elf_loader.h"
 #include <algorithm>
 #include <array>
 #include <cerrno>
@@ -21,6 +22,35 @@ void eraseSecret(std::string& text) { eraseSecretBytes(text.data(), text.size())
 LoginInput::~LoginInput() { eraseSecret(user); eraseSecret(password); }
 namespace {
 bool prompt(const std::string& script, const char* kind, std::string& answer, const std::string& payload = "") {
+    if (script == "@private-pipe") {
+        // Embedded clients render their own sign-in UI. Credentials and codes
+        // travel only through inherited pipes, never argv, files, or logs.
+        if (isatty(STDIN_FILENO) || isatty(STDOUT_FILENO)) throw std::runtime_error("sign-in requires private pipes");
+        auto request = "{\"prompt\":" + jsonString(kind) + ",\"plist\":" + jsonString(payload) + "}";
+        if (request.size() > 65536) throw std::runtime_error("sign-in prompt is too large");
+        auto transfer = [](int fd, void* pointer, size_t size, bool writing) {
+            auto* bytes = static_cast<unsigned char*>(pointer);
+            while (size) {
+                ssize_t count = writing ? write(fd, bytes, size) : read(fd, bytes, size);
+                if (count < 0 && errno == EINTR) continue;
+                if (count <= 0) return false;
+                bytes += count; size -= static_cast<size_t>(count);
+            }
+            return true;
+        };
+        std::array<unsigned char, 4> prefix{};
+        auto size = static_cast<uint32_t>(request.size());
+        for (unsigned n = 0; n < 4; ++n) prefix[n] = static_cast<unsigned char>(size >> (24 - n * 8));
+        if (!transfer(STDOUT_FILENO, prefix.data(), prefix.size(), true) ||
+            !transfer(STDOUT_FILENO, request.data(), request.size(), true) ||
+            !transfer(STDIN_FILENO, prefix.data(), prefix.size(), false)) return false;
+        size = 0; for (auto byte : prefix) size = (size << 8) | byte;
+        if (!size) return false;
+        if (size > 8192) throw std::runtime_error("native sign-in input is too long");
+        answer.resize(size);
+        if (!transfer(STDIN_FILENO, answer.data(), answer.size(), false)) { eraseSecret(answer); return false; }
+        return true;
+    }
     answer.reserve(8192);
     int pipefd[2]; if (pipe(pipefd)) throw std::runtime_error("cannot open native prompt pipe");
     int inputfd[2]; if (pipe(inputfd)) { close(pipefd[0]); close(pipefd[1]); throw std::runtime_error("cannot open native prompt input"); }
@@ -75,6 +105,15 @@ bool promptVerification(const std::string& script, std::string& code) {
     if (!prompt(script, "code", code)) return false;
     if (!validVerification(code)) { eraseSecret(code); throw std::runtime_error("verification code must contain six digits"); }
     return true;
+}
+std::string probeAuthInputPipe() {
+    LoginInput input;
+    if (!promptLogin("@private-pipe", input)) return "{\"cancelled\":true,\"credentials_submitted\":false}";
+    std::string code;
+    if (!promptVerification("@private-pipe", code)) return "{\"cancelled\":true,\"credentials_submitted\":false}";
+    eraseSecret(code);
+    int choice = promptDialog("@private-pipe", "Private pipe fixture", "No credentials are submitted by this probe.", {"Continue", "Cancel"});
+    return "{\"credentials_valid\":true,\"verification_valid\":true,\"dialog_choice\":" + std::to_string(choice) + ",\"credentials_submitted\":false}";
 }
 int promptDialog(const std::string& script, const std::string& title, const std::string& message, const std::vector<std::string>& buttons) {
     if (buttons.empty() || buttons.size() > 32) return -1;

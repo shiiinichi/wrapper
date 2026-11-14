@@ -16,4 +16,5 @@ std::string profileIdentity(const std::string& directory);
 bool validVerification(const std::string& code);
 void eraseSecret(std::string& text);
 void eraseSecretBytes(void* data, size_t size);
+std::string probeAuthInputPipe();
 }

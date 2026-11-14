@@ -16,6 +16,7 @@
 #include <stdexcept>
 #include <vector>
 #include <unistd.h>
+#include <CoreFoundation/CoreFoundation.h>
 #include "storefront_ids.inc"
 #include "fairplay_certificate.h"
 
@@ -31,13 +32,13 @@ template<class Function> Function fn(Loader& loader, const char* library, const 
         if (image->report.library == library && image->executableAddress(reinterpret_cast<uintptr_t>(address))) return reinterpret_cast<Function>(address);
     throw std::runtime_error(std::string("native API function is not executable: ") + symbol);
 }
-std::string text(const void* object) {
+std::string text(const void* object, size_t limit = 8 * 1024 * 1024) {
     if (!object) return "";
     auto bytes = static_cast<const unsigned char*>(object);
     size_t size = bytes[0] >> 1; const char* data = reinterpret_cast<const char*>(bytes + 1);
     if (bytes[0] & 1) { std::memcpy(&size, bytes + 8, 8); std::memcpy(&data, bytes + 16, 8); }
     else if (size > 22) throw std::runtime_error("invalid guest short string");
-    if (size > 8 * 1024 * 1024 || (!data && size)) throw std::runtime_error("invalid guest string length");
+    if (size > limit || (!data && size)) throw std::runtime_error("invalid guest string length");
     return std::string(data, size);
 }
 struct OwnedString {
@@ -61,10 +62,43 @@ std::string storefront(Loader& loader, const Services& services) {
     auto raw = value.value();
     return raw.size() == 2 ? raw : builtin_storefront_region(raw.substr(0, raw.find('-')));
 }
+struct OwnedAccount {
+    Loader& loader;
+    GuestShared value;
+    OwnedAccount(Loader& owner, const Services& services) : loader(owner) {
+        callGuestReturn(loader.symbol(store, "_ZNK17storeservicescore14RequestContext7accountEv"), &value, services.context.object);
+    }
+    ~OwnedAccount() {
+        if (value.control) fn<void (*)(void*)>(loader, strings, "_ZNSt6__ndk119__shared_weak_count16__release_sharedEv")(value.control);
+    }
+    explicit operator bool() const { return value.object && value.control; }
+};
 bool accountPresent(Loader& loader, const Services& services) {
-    GuestShared account;
-    callGuestReturn(loader.symbol(store, "_ZNK17storeservicescore14RequestContext7accountEv"), &account, services.context.object);
-    return account.object && account.control;
+    return static_cast<bool>(OwnedAccount(loader, services));
+}
+std::string accountName(Loader& loader, const void* account) {
+    if (!account) return "";
+    try {
+        // These getters return references to the account's cached NDK strings.
+        // Read only name fields; do not request tokens, network data or Contacts.
+        auto first = text(fn<const void* (*)(const void*)>(loader, store, "_ZNK17storeservicescore7Account9firstNameEv")(account), 1024);
+        auto last = text(fn<const void* (*)(const void*)>(loader, store, "_ZNK17storeservicescore7Account8lastNameEv")(account), 1024);
+        auto name = first + (!first.empty() && !last.empty() ? " " : "") + last;
+        auto valid = CFStringCreateWithBytes(nullptr, reinterpret_cast<const UInt8*>(name.data()), name.size(), kCFStringEncodingUTF8, false);
+        if (!valid) return "";
+        CFRelease(valid);
+        return name;
+    } catch (const std::exception&) {
+        // Missing/invalid metadata must not hide a valid signed-in status.
+        return "";
+    }
+}
+std::string accountStatus(Loader& loader, const Services& services) {
+    OwnedAccount account(loader, services);
+    return "{\"regions\":[" + (account ? jsonString(storefront(loader, services)) : "") +
+        "],\"account_present\":" + (account ? "true" : "false") +
+        ",\"account_name\":" + jsonString(account ? accountName(loader, account.value.object) : "") +
+        ",\"backend\":\"macos-arm64\",\"temari_compatible\":false,\"native_sample_decryption\":true}";
 }
 std::string signedRequest(Loader& loader, const Services& services, const std::string& url, const std::string& body, bool developer) {
     auto allocation = static_cast<unsigned char*>(std::calloc(1, 512));
@@ -232,11 +266,11 @@ std::unique_ptr<NativeContext> createContext(Loader& loader, const Services& ser
 }
 }
 
-void nativeDecryptionWorker(Loader& loader, const std::string& directory) {
+void nativeDecryptionWorker(Loader& loader, const std::string& directory, bool embedded) {
     if (isatty(STDIN_FILENO) || isatty(STDOUT_FILENO)) throw std::runtime_error("sample worker requires private pipes");
     setGuestLogging(false);
     auto services = initializeServices(loader, directory, profileIdentity(directory));
-    if (!accountPresent(loader, services)) throw std::runtime_error("no saved account");
+    if (!embedded && !accountPresent(loader, services)) throw std::runtime_error("no saved account");
     std::vector<std::unique_ptr<NativeContext>> contexts;
     writeFrame(true, Bytes{'N', 'A', 'D', '2'});
     Bytes request;
@@ -246,6 +280,7 @@ void nativeDecryptionWorker(Loader& loader, const std::string& directory) {
             auto operation = input.word();
             Bytes response;
             if (operation == 1) {
+                if (!accountPresent(loader, services)) throw std::runtime_error("no saved account");
                 auto adam = input.string(19), uri = input.string(8192);
                 input.end();
                 if (contexts.size() >= 64) throw std::runtime_error("native context capacity reached");
@@ -281,6 +316,15 @@ void nativeDecryptionWorker(Loader& loader, const std::string& directory) {
                 // cache hits. Clear that cache before opening another key URI.
                 // Existing contexts remain owned by the worker's shared_ptrs.
                 fn<void (*)(void*)>(loader, music, "_ZN21SVFootHillSessionCtrl16resetAllContextsEv")(services.foothill);
+            } else if (embedded && operation == 4) {
+                input.end();
+                auto json = accountStatus(loader, services);
+                response.assign(json.begin(), json.end());
+            } else if (embedded && operation == 5) {
+                input.end();
+                if (!accountPresent(loader, services)) throw std::runtime_error("no saved account");
+                auto json = tokens(loader, services);
+                response.assign(json.begin(), json.end());
             } else throw std::runtime_error("unknown native sample operation");
             writeFrame(true, response);
         } catch (const std::exception&) {
@@ -288,5 +332,36 @@ void nativeDecryptionWorker(Loader& loader, const std::string& directory) {
             writeFrame(false, {});
         }
     }
+}
+
+std::string probeAccountMetadataAbi(Loader& loader, const std::string& directory) {
+    setGuestLogging(false);
+    auto services = initializeServices(loader, directory, profileIdentity(directory)); (void)services;
+    // The pinned Account constructor uses 192 bytes. An independent canary
+    // after that object catches ABI drift; no saved or real account is changed.
+    alignas(16) std::array<unsigned char, 256> storage{};
+    std::fill(storage.begin() + 192, storage.end(), 0xa5);
+    fn<void (*)(void*)>(loader, store, "_ZN17storeservicescore7AccountC2Ev")(storage.data());
+    auto destroy = [&] { fn<void (*)(void*)>(loader, store, "_ZN17storeservicescore7AccountD2Ev")(storage.data()); };
+    try {
+        if (!accountName(loader, storage.data()).empty() || !accountName(loader, nullptr).empty()) throw std::runtime_error("empty native account name did not fall back");
+        auto set = [&](const std::string& first, const std::string& last) {
+            OwnedString given(loader, first), family(loader, last);
+            fn<void (*)(void*, const void*)>(loader, store, "_ZN17storeservicescore7Account12setFirstNameERKNSt6__ndk112basic_stringIcNS1_11char_traitsIcEENS1_9allocatorIcEEEE")(storage.data(), given.bytes.data());
+            fn<void (*)(void*, const void*)>(loader, store, "_ZN17storeservicescore7Account11setLastNameERKNSt6__ndk112basic_stringIcNS1_11char_traitsIcEENS1_9allocatorIcEEEE")(storage.data(), family.bytes.data());
+        };
+        std::string first = "Renée " + std::string(80, 'x'), last = "山田";
+        set(first, last);
+        if (accountName(loader, storage.data()) != first + " " + last) throw std::runtime_error("native account name round trip failed");
+        set("", last);
+        if (accountName(loader, storage.data()) != last) throw std::runtime_error("partial native account name was lost");
+        set(std::string(1025, 'x'), last);
+        if (!accountName(loader, storage.data()).empty()) throw std::runtime_error("oversized native account name was accepted");
+        set(std::string(1, char(0xff)), last);
+        if (!accountName(loader, storage.data()).empty()) throw std::runtime_error("invalid native account UTF-8 was accepted");
+        if (!std::all_of(storage.begin() + 192, storage.end(), [](unsigned char c) { return c == 0xa5; })) throw std::runtime_error("native Account layout changed");
+    } catch (...) { destroy(); throw; }
+    destroy();
+    return "{\"name_round_trip\":true,\"empty_name_fallback\":true,\"partial_name\":true,\"bounded_name\":true,\"invalid_utf8_fallback\":true,\"credentials_submitted\":false}";
 }
 }

@@ -88,6 +88,9 @@ Actual DRM license issuance needs a player/CDM-generated challenge.
 See the [native implementation guide](native/macos/README.md) for authentication,
 token lifecycle, compatibility boundaries, and detailed validation evidence.
 
+For embedding in a macOS app, build [NativeMusicWrapperKit](native/macos/BinaryPackage/README.md),
+a binary Swift package with a precompiled, privately spawned worker and its pinned assets.
+
 ## Optional CMake entrypoint
 
 On macOS, CMake selects the native build and delegates to the same build script:

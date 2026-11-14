@@ -86,10 +86,10 @@ manifest hashes; caller-owned or modified files are preserved.
 ## Reusing the native core
 
 `./script/build_and_run.sh --build` produces the standalone native executable
-and validated `build/native-poc/assets/`. The native core has no dependency on
-the desktop UI or Python HTTP adapter. Host apps can bundle these artifacts or
-vendor the C++ sources, headers, assembly, and pinned asset manifest. The host
-adapter owns signing, sandbox inheritance, and an app-private `--data-dir`.
+and validated `build/native-poc/assets/`. Host apps can use the
+[binary Swift package](BinaryPackage/README.md), which contains the Swift wrapper,
+private-pipe worker and validated assets. The host selects its app-private
+profile and signs the worker with its own sandbox-inheriting identity.
 Use one owner for each profile at a time.
 
 The existing native `--api` operations and framed sample worker remain stable.
