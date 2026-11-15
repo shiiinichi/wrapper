@@ -1,5 +1,7 @@
 #include "test_support.h"
 #include <sqlite3.h>
+#include <sys/file.h>
+#include <sys/stat.h>
 using namespace validation;
 namespace {
 struct Database {
@@ -18,6 +20,29 @@ void account(Database &database) {
 }
 }
 void profileTests(Report &report) {
+    report.run("profile import respects the destination lock and preserves its inode", [] {
+        Temp t;
+        auto source = t.path / "source", dest = t.path / "dest";
+        fs::create_directory(source);
+        fs::create_directory(dest);
+        write(source / "native-device-id", "0123456789abcdef");
+        { Database db(source / "accounts.sqlitedb"); account(db); }
+        write(dest / "keep", "existing");
+        int fd = open((dest / "native-api.lock").c_str(), O_CREAT | O_RDWR | O_CLOEXEC, 0600);
+        require(fd >= 0, "destination lock");
+        struct Close { int fd; ~Close() { close(fd); } } held{fd};
+        require(!flock(fd, LOCK_EX | LOCK_NB), "lock destination");
+        struct stat before{}, after{};
+        require(!fstat(fd, &before), "lock identity");
+        require(nmw_import_profile(source.c_str(), dest.c_str()) == NMW_BUSY &&
+                    read(dest / "keep") == "existing", "active destination replaced");
+        require(!flock(fd, LOCK_UN), "unlock destination");
+        require(nmw_import_profile(source.c_str(), dest.c_str()) == NMW_OK, "stopped destination rejected");
+        require(!stat((dest / "native-api.lock").c_str(), &after) &&
+                    before.st_ino == after.st_ino && before.st_dev == after.st_dev, "lock inode replaced");
+        require(!flock(fd, LOCK_EX | LOCK_NB), "relock published profile");
+        require(nmw_import_profile(source.c_str(), dest.c_str()) == NMW_BUSY, "old descriptor lost exclusion");
+    });
     report.run("invalid account imports preserve the complete destination", [] {
         for (auto invalid : {"corrupt", "empty", "signed out", "corrupt cookies"}) {
             Temp t;

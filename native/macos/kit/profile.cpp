@@ -152,10 +152,29 @@ void copyProfile(const std::string &from, const std::string &to) {
         if (mark.fd < 0)
             fail(NMW_UNAVAILABLE);
     }
-    if (fs::exists(dest)) {
-        if (renameatx_np(AT_FDCWD, stage.c_str(), AT_FDCWD, dest.c_str(), RENAME_SWAP))
-            fail(NMW_UNAVAILABLE);
-    } else if (rename(stage.c_str(), dest.c_str()))
+    fs::create_directory(dest);
+    Descriptor destination(open(dest.c_str(), O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC));
+    if (destination.fd < 0)
+        fail(NMW_UNAVAILABLE);
+    Descriptor destinationLock(openat(destination.fd, "native-api.lock",
+                                      O_CREAT | O_RDWR | O_NOFOLLOW | O_CLOEXEC | O_NONBLOCK, 0600));
+    struct stat locked{}, directory{}, current{};
+    if (destinationLock.fd < 0 || fstat(destinationLock.fd, &locked) || !S_ISREG(locked.st_mode) ||
+        locked.st_uid != getuid())
+        fail(NMW_UNAVAILABLE);
+    if (flock(destinationLock.fd, LOCK_EX | LOCK_NB))
+        fail(NMW_BUSY);
+    // A concurrent import may have replaced the directory while we opened it.
+    if (fstat(destination.fd, &directory) || lstat(dest.c_str(), &current) ||
+        directory.st_dev != current.st_dev || directory.st_ino != current.st_ino)
+        fail(NMW_BUSY);
+    // Keep the same lock inode at the published path across the atomic swap.
+    // Workers opening either directory observe this lock until import finishes.
+    if (linkat(destination.fd, "native-api.lock", AT_FDCWD, (stage / "native-api.lock").c_str(), 0) ||
+        lstat((stage / "native-api.lock").c_str(), &current) ||
+        locked.st_dev != current.st_dev || locked.st_ino != current.st_ino)
+        fail(NMW_UNAVAILABLE);
+    if (renameatx_np(AT_FDCWD, stage.c_str(), AT_FDCWD, dest.c_str(), RENAME_SWAP))
         fail(NMW_UNAVAILABLE);
 }
 } // namespace wrapper
