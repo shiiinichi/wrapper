@@ -101,6 +101,21 @@ Bytes samples() {
     return b;
 }
 void outputs(Report &r) {
+    r.run("failed playback leases remain retryable and successful leases are reused", [] {
+        native_poc::DeviceManifestSession session;
+        unsigned calls = 0;
+        auto request = [](void *context, const bool *interrupt) {
+            require(!*interrupt, "lease interrupted other devices");
+            return ++*static_cast<unsigned *>(context) > 1;
+        };
+        bool rejected = false;
+        try { session.requirePlaybackLease(request, &calls); }
+        catch (const std::runtime_error &) { rejected = true; }
+        require(rejected && !session.requestedPlaybackLease, "failed lease was cached");
+        session.requirePlaybackLease(request, &calls);
+        session.requirePlaybackLease(request, &calls);
+        require(session.requestedPlaybackLease && calls == 2, "lease retry or reuse");
+    });
     r.run("device lookup order for every entitlement and source combination", [] {
         for (bool allowed : {false, true})
             for (bool download : {false, true})

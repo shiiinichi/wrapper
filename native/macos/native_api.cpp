@@ -166,21 +166,15 @@ DeviceAsset playbackAsset(Loader& loader, const Services& services, int64_t id) 
     return {text(url.bytes.data(), 32 * 1024), flavor.value()};
 }
 
-struct DeviceManifestSession {
-    std::optional<bool> offlineChannel;
-    bool requestedPlaybackLease = false;
-};
 std::string deviceManifest(Loader& loader, const Services& services, const std::string& adam, DeviceManifestSession& session) {
     auto id = subscriptionSongID(adam);
     if (!session.offlineChannel.has_value()) session.offlineChannel = hasOfflineChannel(loader, services);
     auto asset = resolveDeviceAsset(*session.offlineChannel,
         [&] { return subscriptionAsset(loader, services, id); },
         [&] {
-            if (!session.requestedPlaybackLease) {
-                const bool interrupt = false;
-                fn<void (*)(void*, const bool*)>(loader, music, "_ZN22SVPlaybackLeaseManager12requestLeaseERKb")(services.lease, &interrupt);
-                session.requestedPlaybackLease = true;
-            }
+            session.requirePlaybackLease(
+                fn<bool (*)(void*, const bool*)>(loader, music, "_ZN22SVPlaybackLeaseManager12requestLeaseERKb"),
+                services.lease);
             return playbackAsset(loader, services, id);
         });
     const char* type = asset.flavor == "HLS" ? "hls" : "file";
