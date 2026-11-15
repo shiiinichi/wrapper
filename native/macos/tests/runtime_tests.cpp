@@ -14,6 +14,8 @@ struct Fixture {
     std::vector<Json> requests;
     Json asset = {{"adamId", "123"}, {"m3u8", "https://aod.itunes.apple.com/device.m3u8"}, {"streamType", "hls"}};
     Json api = Json::object();
+    std::string errorURL;
+    int httpError = 0;
     int version = 1;
     uint32_t next = 0;
     bool broken = false;
@@ -34,6 +36,7 @@ struct Fixture {
             } else if (kind == NMW_HTTP) {
                 auto q = json(data);
                 f.requests.push_back(q);
+                if (q["url"] == f.errorURL) return f.httpError;
                 std::string result;
                 if (q["url"] == "https://music.apple.com")
                     result = "<script src=\"/assets/index~test.js\"></script>";
@@ -104,6 +107,23 @@ Bytes samples() {
     return b;
 }
 void outputs(Report &r) {
+    r.run("artist not found applies only to catalog lookup failures", [] {
+        for (auto url : {"https://music.apple.com", "https://music.apple.com/assets/index~test.js"}) {
+            Env e;
+            e.fixture.errorURL = url;
+            e.fixture.httpError = NMW_HTTP_BASE + 404;
+            int code = 0;
+            try { e.send("/artist", {{"adamId", "123"}}); }
+            catch (const Failure &failure) { code = failure.code; }
+            require(code == NMW_HTTP_BASE + 404, "bootstrap 404 became artist not found");
+        }
+        Env e;
+        e.fixture.errorURL = "https://amp-api.music.apple.com/v1/catalog/us/artists/123"
+                             "?extend=artistBio,origin,bornOrFormed,editorialArtwork,hero";
+        e.fixture.httpError = NMW_HTTP_BASE + 404;
+        require(e.send("/artist", {{"adamId", "123"}}).envelope["code"] == 404, "catalog 404 lost");
+        require(e.fixture.commands.empty(), "artist lookup used account");
+    });
     r.run("token-cache waiters cancel independently of an artist refresh", [] {
         struct Fixture { std::promise<void> entered, tokens, release; } fixture;
         auto hook = [](void *context, int32_t kind, const NMWOperation *, const uint8_t *, size_t, NMWBytes *out) -> int32_t {

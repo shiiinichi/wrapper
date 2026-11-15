@@ -282,9 +282,10 @@ Json Service::webRoute(const std::string &route, const std::string &id, const Js
                        [](unsigned char c) { return char(std::tolower(c)); });
         const auto url = amp + "catalog/" + region + "/artists/" + id +
                          "?extend=artistBio,origin,bornOrFormed,editorialArtwork,hero";
+        auto bearer = webToken(op);
         try {
             auto root =
-                json(fetch({url, {{"Authorization", "Bearer " + webToken(op)}, {"Origin", origin}}, {}}, op));
+                json(fetch({url, {{"Authorization", "Bearer " + bearer}, {"Origin", origin}}, {}}, op));
             if (hasErrors(root))
                 fail(NMW_INVALID);
             return artist(root, id, region);
