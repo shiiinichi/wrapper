@@ -2,14 +2,49 @@
 #include "elf_loader.h"
 #include "shims.h"
 #include "abi_runtime.h"
+#include "posix_bridge.h"
 #include <array>
 #include <cstring>
+#include <filesystem>
+#include <fstream>
 #include <stdexcept>
 #include <vector>
 #include <zlib.h>
 #include <CommonCrypto/CommonDigest.h>
 
 namespace native_poc {
+std::string probeFileConfinement(const std::string& directory) {
+    namespace fs = std::filesystem;
+    if (directory.empty()) throw std::runtime_error("file probe requires data directory");
+    auto root = fs::path(directory) / "profile";
+    fs::create_directories(root);
+    setRuntimeDirectory(root.string());
+    auto check = [](bool value) { if (!value) throw std::runtime_error("guest file confinement failed"); };
+    auto open = reinterpret_cast<int (*)(const char*, int, unsigned)>(posixBridge("open").address);
+    auto close = reinterpret_cast<int (*)(int)>(posixBridge("close").address);
+    auto fopen = reinterpret_cast<void* (*)(const char*, const char*)>(runtimeBridge("fopen").address);
+    auto fclose = reinterpret_cast<int (*)(void*)>(runtimeBridge("fclose").address);
+    auto outside = fs::path(directory) / "outside";
+    fs::create_symlink(outside, root / "dangling");
+    check(!writablePath((root / "dangling").c_str()));
+    check(open((root / "dangling").c_str(), 0100 | 01, 0600) < 0);
+    check(fopen((root / "dangling").c_str(), "w") == nullptr);
+    check(!fs::exists(outside));
+    fs::create_directory(outside);
+    fs::create_directory_symlink(outside, root / "external");
+    check(open((root / "external" / "new").c_str(), 0100 | 01, 0600) < 0);
+    check(fopen((root / "external" / "new").c_str(), "a+") == nullptr);
+    check(!fs::exists(outside / "new"));
+    int fd = open((root / "ordinary").c_str(), 0100 | 01, 0600);
+    check(fd >= 0); close(fd);
+    fs::create_symlink(root / "ordinary", root / "internal");
+    fd = open((root / "internal").c_str(), 01, 0600);
+    check(fd >= 0); close(fd);
+    check(open((root / "internal").c_str(), 01 | 0400000, 0600) < 0);
+    auto stream = fopen((root / "stdio").c_str(), "w+");
+    check(stream != nullptr); check(fclose(stream) == 0);
+    return "{\"dangling_symlink_rejected\":true,\"external_directory_rejected\":true,\"ordinary_writes\":true,\"internal_symlink\":true,\"stdio_writes\":true}";
+}
 std::string probeSecurityAbi(Loader& loader) {
     auto check = [](bool value, const char* error) { if (!value) throw std::runtime_error(error); };
     for (auto name : {"libz.so", "libxml2.so", "libicuuc_sv_apple.so"}) loader.loadHostLibrary(name);

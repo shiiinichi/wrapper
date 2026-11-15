@@ -9,6 +9,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <dlfcn.h>
+#include <fcntl.h>
 #include <map>
 #include <memory>
 #include <mutex>
@@ -52,8 +53,20 @@ FILE* file(void* pointer) {
 }
 void* fopenBridge(const char* path, const char* mode) {
     if (!path || !mode) { android_errno = 22; return nullptr; }
-    if (std::strpbrk(mode, "wa+") && !writablePath(path)) { android_errno = 13; return nullptr; }
-    FILE* value = std::fopen(path, mode);
+    FILE* value = nullptr;
+    if (std::strpbrk(mode, "wa+")) {
+        if (*mode != 'r' && *mode != 'w' && *mode != 'a') { android_errno = 22; return nullptr; }
+        int flags = std::strchr(mode, '+') ? O_RDWR : O_WRONLY;
+        if (*mode == 'w') flags |= O_CREAT | O_TRUNC;
+        if (*mode == 'a') flags |= O_CREAT | O_APPEND;
+        if (std::strchr(mode, 'x')) flags |= O_EXCL;
+        if (std::strchr(mode, 'e')) flags |= O_CLOEXEC;
+        int fd = openRuntimeFile(path, flags, 0666);
+        if (fd >= 0) {
+            value = fdopen(fd, mode);
+            if (!value) { int error = errno; close(fd); errno = error; }
+        }
+    } else value = std::fopen(path, mode);
     if (!value) { android_errno = linuxError(errno); return nullptr; }
     auto shell = std::make_unique<std::array<unsigned char, kFileSize>>();
     shell->fill(0);

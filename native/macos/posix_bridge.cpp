@@ -24,6 +24,28 @@ namespace {
 std::filesystem::path write_root;
 std::mutex descriptor_lock;
 std::set<int> writable_descriptors;
+std::filesystem::path writableTarget(const char* path, bool followFinal = true) {
+    namespace fs = std::filesystem;
+    if (write_root.empty() || !path || !*path) return {};
+    std::error_code error;
+    fs::path resolved;
+    if (followFinal) resolved = fs::canonical(path, error);
+    if (!followFinal || error) {
+        if (followFinal && error != std::errc::no_such_file_or_directory) return {};
+        // canonical must fail for a dangling link, even if its text is under the root.
+        auto state = fs::symlink_status(path, error);
+        if (followFinal && (fs::is_symlink(state) || (error && error != std::errc::no_such_file_or_directory))) return {};
+        auto absolute = fs::absolute(path, error);
+        if (error) return {};
+        auto parent = fs::canonical(absolute.parent_path(), error);
+        if (error) return {};
+        resolved = parent / absolute.filename();
+    }
+    auto relative = resolved.lexically_relative(write_root);
+    if (relative.empty() || relative.is_absolute()) return {};
+    for (const auto& component : relative) if (component == "..") return {};
+    return resolved;
+}
 template<class T> T result(T value) { if (value == T(-1)) guestErrno() = linuxError(errno); return value; }
 [[noreturn]] void unsupported(const char* operation) {
     std::fprintf(stderr, "native-poc: unsupported Android POSIX operation: %s\n", operation); _exit(86);
@@ -40,8 +62,9 @@ int nativeFlags(int flags) {
 }
 int openBridge(const char* path, int flags, unsigned mode) {
     bool writing = flags & (3 | 0100 | 01000);
-    if (writing && !writablePath(path)) { guestErrno() = 13; return -1; }
-    int fd = result(::open(path, nativeFlags(flags), static_cast<mode_t>(mode & 0777)));
+    int native = nativeFlags(flags);
+    int fd = result(writing ? openRuntimeFile(path, native, mode & 0777)
+                            : ::open(path, native, static_cast<mode_t>(mode & 0777)));
     if (fd >= 0 && writing) { std::lock_guard<std::mutex> lock(descriptor_lock); writable_descriptors.insert(fd); }
     return fd;
 }
@@ -192,13 +215,14 @@ int ioctlBridge(int fd, unsigned long command, void* argument) {
 
 void setRuntimeDirectory(const std::string& path) { write_root = std::filesystem::canonical(path); }
 bool writablePath(const char* path) {
-    if (write_root.empty() || !path) return false;
-    std::error_code error; auto resolved = std::filesystem::weakly_canonical(path, error);
-    if (error) return false;
-    auto relative = resolved.lexically_relative(write_root);
-    if (relative.empty() || relative.is_absolute()) return false;
-    for (const auto& component : relative) if (component == "..") return false;
-    return true;
+    return !writableTarget(path).empty();
+}
+int openRuntimeFile(const char* path, int flags, unsigned mode) {
+    auto target = writableTarget(path, !(flags & O_NOFOLLOW));
+    if (target.empty()) { errno = EACCES; return -1; }
+    // Resolve permitted existing links first, then reject any symlink introduced
+    // between validation and open, including intermediate path components.
+    return ::open(target.c_str(), flags | O_NOFOLLOW_ANY, static_cast<mode_t>(mode));
 }
 ssize_t checkedRead(int descriptor, void* buffer, size_t count, size_t capacity) {
     if (count > capacity) unsupported("__read_chk buffer bounds");

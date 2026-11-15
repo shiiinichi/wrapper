@@ -6,6 +6,7 @@ void guestInlineTimeSyscall(uint64_t* registers);
 Bridge posixBridge(const std::string& name);
 void setRuntimeDirectory(const std::string& path);
 bool writablePath(const char* path);
+int openRuntimeFile(const char* path, int flags, unsigned mode);
 int& guestErrno();
 int linuxError(int value);
 }

@@ -158,6 +158,10 @@ void loaderTests(Report &r, const fs::path &worker, const fs::path &assets, cons
         require(p.wait() == 1 && read(p.out).find("requires --data-dir") != std::string::npos,
                 "missing profile accepted");
     });
+    r.run("guest POSIX and stdio creation stay inside the profile", [&] {
+        Temp t;
+        allTrue(invoke(worker, assets, "--probe", "security-files", t.path)["result"]);
+    });
     r.run("native libcurl transfers exact callback bytes", [&] {
         Temp t;
         write(t.path / "transfer.txt", "native-curl-typed-transfer\n");
