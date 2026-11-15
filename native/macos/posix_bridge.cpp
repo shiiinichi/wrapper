@@ -214,15 +214,18 @@ int ioctlBridge(int fd, unsigned long command, void* argument) {
 } // namespace
 
 void setRuntimeDirectory(const std::string& path) { write_root = std::filesystem::canonical(path); }
+std::string runtimeDirectory() { return write_root.string(); }
 bool writablePath(const char* path) {
     return !writableTarget(path).empty();
 }
-int openRuntimeFile(const char* path, int flags, unsigned mode) {
+int openRuntimeFile(const char* path, int flags, unsigned mode, int (*openFile)(const char*, int, int)) {
     auto target = writableTarget(path, !(flags & O_NOFOLLOW));
     if (target.empty()) { errno = EACCES; return -1; }
     // Resolve permitted existing links first, then reject any symlink introduced
     // between validation and open, including intermediate path components.
-    return ::open(target.c_str(), flags | O_NOFOLLOW_ANY, static_cast<mode_t>(mode));
+    flags = (flags & ~O_NOFOLLOW) | O_NOFOLLOW_ANY;
+    if (openFile) return openFile(target.c_str(), flags, static_cast<int>(mode));
+    return ::open(target.c_str(), flags, static_cast<mode_t>(mode));
 }
 ssize_t checkedRead(int descriptor, void* buffer, size_t count, size_t capacity) {
     if (count > capacity) unsupported("__read_chk buffer bounds");

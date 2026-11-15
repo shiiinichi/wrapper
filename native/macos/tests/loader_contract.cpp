@@ -162,6 +162,10 @@ void loaderTests(Report &r, const fs::path &worker, const fs::path &assets, cons
         Temp t;
         allTrue(invoke(worker, assets, "--probe", "security-files", t.path)["result"]);
     });
+    r.run("SQLite attachments and VACUUM destinations stay inside the profile", [&] {
+        Temp t;
+        allTrue(invoke(worker, assets, "--probe", "security-sqlite", t.path)["result"]);
+    });
     r.run("native libcurl transfers exact callback bytes", [&] {
         Temp t;
         write(t.path / "transfer.txt", "native-curl-typed-transfer\n");

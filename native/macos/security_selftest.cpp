@@ -3,16 +3,53 @@
 #include "shims.h"
 #include "abi_runtime.h"
 #include "posix_bridge.h"
+#include "sqlite_bridge.h"
 #include <array>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
+#include <sqlite3.h>
 #include <stdexcept>
 #include <vector>
 #include <zlib.h>
 #include <CommonCrypto/CommonDigest.h>
 
 namespace native_poc {
+std::string probeSQLiteConfinement(const std::string& directory) {
+    namespace fs = std::filesystem;
+    if (directory.empty()) throw std::runtime_error("SQLite probe requires data directory");
+    auto root = fs::path(directory) / "profile";
+    fs::create_directories(root);
+    setRuntimeDirectory(root.string());
+    auto check = [](bool value) { if (!value) throw std::runtime_error("SQLite confinement failed"); };
+    auto open = reinterpret_cast<decltype(&sqlite3_open)>(sqliteBridge("sqlite3_open", false).address);
+    sqlite3* db = nullptr;
+    check(open((root / "main.sqlite").c_str(), &db) == SQLITE_OK);
+    struct Close { sqlite3* value; ~Close() { sqlite3_close(value); } } close{db};
+    if (sqlite3_exec(db, "CREATE TABLE payload(id); INSERT INTO payload VALUES(42)", nullptr, nullptr, nullptr) != SQLITE_OK)
+        throw std::runtime_error(std::string("SQLite fixture setup failed ") + std::to_string(sqlite3_extended_errcode(db)) + " " + sqlite3_errmsg(db));
+    auto execute = [&](const char* sql, const std::string& path) {
+        sqlite3_stmt* statement = nullptr;
+        check(sqlite3_prepare_v2(db, sql, -1, &statement, nullptr) == SQLITE_OK);
+        sqlite3_bind_text(statement, 1, path.c_str(), -1, SQLITE_TRANSIENT);
+        int result = sqlite3_step(statement);
+        sqlite3_finalize(statement);
+        return result;
+    };
+    auto outside = fs::path(directory) / "outside.sqlite";
+    check(execute("ATTACH DATABASE ? AS other", outside.string()) != SQLITE_DONE);
+    check(execute("ATTACH DATABASE ? AS other", "file:" + outside.string() + "?vfs=unix") != SQLITE_DONE);
+    check(execute("VACUUM INTO ?", outside.string()) != SQLITE_DONE);
+    check(!fs::exists(outside));
+    check(execute("ATTACH DATABASE ? AS other", (root / "other.sqlite").string()) == SQLITE_DONE);
+    check(sqlite3_exec(db, "CREATE TABLE other.payload(id); DETACH other; PRAGMA journal_mode=WAL;"
+                          "INSERT INTO payload VALUES(43)", nullptr, nullptr, nullptr) == SQLITE_OK);
+    check(execute("VACUUM INTO ?", (root / "backup.sqlite").string()) == SQLITE_DONE);
+    check(execute("ATTACH DATABASE ? AS other", ":memory:") == SQLITE_DONE);
+    check(sqlite3_exec(db, "CREATE TABLE other.payload(id); CREATE TEMP TABLE scratch(id)",
+                      nullptr, nullptr, nullptr) == SQLITE_OK);
+    return "{\"outside_attach_rejected\":true,\"outside_vacuum_rejected\":true,\"parameterized_attach\":true,\"wal\":true,\"in_profile_vacuum\":true,\"memory_and_temp\":true}";
+}
 std::string probeFileConfinement(const std::string& directory) {
     namespace fs = std::filesystem;
     if (directory.empty()) throw std::runtime_error("file probe requires data directory");
@@ -36,6 +73,8 @@ std::string probeFileConfinement(const std::string& directory) {
     check(fopen((root / "external" / "new").c_str(), "a+") == nullptr);
     check(!fs::exists(outside / "new"));
     int fd = open((root / "ordinary").c_str(), 0100 | 01, 0600);
+    check(fd >= 0); close(fd);
+    fd = open((root / "ordinary").c_str(), 01 | 0400000, 0600);
     check(fd >= 0); close(fd);
     fs::create_symlink(root / "ordinary", root / "internal");
     fd = open((root / "internal").c_str(), 01, 0600);

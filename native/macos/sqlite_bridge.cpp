@@ -2,22 +2,58 @@
 #include "posix_bridge.h"
 #include "abi_runtime.h"
 #include <atomic>
+#include <cerrno>
 #include <cstdio>
 #include <cstring>
 #include <dlfcn.h>
+#include <fcntl.h>
 #include <sqlite3.h>
 #include <unistd.h>
 namespace native_poc {
 namespace {
 std::atomic<size_t> opened{0};
+int (*systemOpen)(const char*, int, int) = nullptr;
+int confinedOpen(const char* path, int flags, int mode) noexcept try {
+    // The Unix VFS shares this syscall across primary, attached, journal and
+    // VACUUM INTO files, including filenames evaluated from SQL parameters.
+    if (path && !std::strcmp(path, "/dev/urandom") && (flags & O_ACCMODE) == O_RDONLY &&
+        !(flags & (O_CREAT | O_TRUNC)))
+        return systemOpen(path, flags, mode);
+    // Preserve Apple's guarded descriptor setup in its original open callback.
+    return openRuntimeFile(path, flags, static_cast<unsigned>(mode), systemOpen);
+} catch (...) {
+    errno = EACCES;
+    return -1;
+}
+bool configureFilesystem() {
+    static const bool configured = [] {
+        auto vfs = sqlite3_vfs_find(nullptr);
+        if (!vfs || vfs->iVersion < 3 || !vfs->xGetSystemCall || !vfs->xSetSystemCall)
+            return false;
+        systemOpen = reinterpret_cast<decltype(systemOpen)>(vfs->xGetSystemCall(vfs, "open"));
+        if (!systemOpen || runtimeDirectory().empty())
+            return false;
+        auto temporary = sqlite3_mprintf("%s", runtimeDirectory().c_str());
+        if (!temporary)
+            return false;
+        if (vfs->xSetSystemCall(vfs, "open", reinterpret_cast<sqlite3_syscall_ptr>(confinedOpen)) != SQLITE_OK) {
+            sqlite3_free(temporary);
+            return false;
+        }
+        // The isolated worker configures SQLite before opening its databases.
+        sqlite3_temp_directory = temporary;
+        return true;
+    }();
+    return configured;
+}
 bool allowed(const char* path) { return path && (!std::strcmp(path, ":memory:") || writablePath(path)); }
 int openDatabase(const char* path, sqlite3** output) {
-    if (!allowed(path)) { if (output) *output = nullptr; return SQLITE_CANTOPEN; }
+    if (!allowed(path) || !configureFilesystem()) { if (output) *output = nullptr; return SQLITE_CANTOPEN; }
     int code = sqlite3_open(path, output); if (!code) ++opened; return code;
 }
 int openDatabaseV2(const char* path, sqlite3** output, int flags, const char* vfs) {
     // Keep database writes in the same dedicated profile as guest POSIX writes.
-    if (!allowed(path) || vfs) { if (output) *output = nullptr; return SQLITE_CANTOPEN; }
+    if (!allowed(path) || vfs || !configureFilesystem()) { if (output) *output = nullptr; return SQLITE_CANTOPEN; }
     int code = sqlite3_open_v2(path, output, flags, vfs); if (!code) ++opened; return code;
 }
 [[noreturn]] void unsupportedOption(int option) { std::fprintf(stderr, "native-poc: unsupported SQLite configuration %d\n", option); _exit(86); }

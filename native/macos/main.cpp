@@ -187,6 +187,7 @@ int main(int argc, char** argv) {
             if (library == "zlib") result = probeZlib(*loader);
             else if (library == "security-abi") result = native_poc::probeSecurityAbi(*loader);
             else if (library == "security-files") result = native_poc::probeFileConfinement(data_directory);
+            else if (library == "security-sqlite") result = native_poc::probeSQLiteConfinement(data_directory);
             else if (library == "blocks") result = probeBlocks(*loader);
             else if (library == "coreadi-jni" && apple_profile) result = native_poc::probeAppleJni(*loader, "libCoreADI.so");
             else if (library == "lskd-jni" && apple_profile) result = native_poc::probeAppleJni(*loader, "libCoreLSKD.so");
