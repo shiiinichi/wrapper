@@ -118,6 +118,17 @@ void standaloneTests(Report &r, const fs::path &build, const fs::path &assets) {
         require(envelope(client.Post("/decrypt", "abc", "application/json"))["code"] == 400, "type");
         require(envelope(client.Get("/m3u8?adamId=-1"))["code"] == 400, "ID");
     });
+    r.run("malformed methods cannot crash or inject data into timing logs", [&] {
+        for (const auto &method : {std::string(1, char(0xff)), std::string("private-method-fixture")}) {
+            auto response = rawRequest(port, method + " /status HTTP/1.1\r\nHost: localhost\r\n\r\n");
+            require(response.find("\"code\":400") != response.npos, "malformed method response");
+            require(envelope(client.Get("/status"))["code"] == 0, "server stopped");
+        }
+        auto log = read(profile / "http-timings.jsonl");
+        require(log.find("private-method-fixture") == log.npos && log.find(char(0xff)) == log.npos,
+                "raw method was logged");
+        require(log.find("\"method\":\"unknown\"") != log.npos, "missing stable method");
+    });
     r.run("timings contain route and duration without secrets or signed URLs", [&] {
         (void)client.Get("/unknown?secret=fixture-secret");
         auto log = read(profile / "http-timings.jsonl");

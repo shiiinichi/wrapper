@@ -49,9 +49,10 @@ Options options(int argc, char **argv) {
         o.instance = std::to_string(getpid()) + "-" + std::to_string(arc4random());
     return o;
 }
-void record(const Options &o, const std::string &route, const std::string &method, int code, double ms) {
+void record(const Options &o, const std::string &route, const std::string &method, int code, double ms) noexcept try {
+    static const std::set<std::string> methods = {"GET", "HEAD", "POST", "PUT", "DELETE", "OPTIONS", "PATCH"};
     Json j = {{"endpoint", route},
-              {"method", method},
+              {"method", methods.count(method) ? method : "unknown"},
               {"code", code},
               {"server_ms", ms},
               {"time", static_cast<int64_t>(time(nullptr))}};
@@ -62,6 +63,8 @@ void record(const Options &o, const std::string &route, const std::string &metho
         (void)write(fd, text.data(), text.size());
         close(fd);
     }
+} catch (...) {
+    // Timing is best effort, including on the malformed-request error path.
 }
 int envelopeCode(int error) {
     switch (error) {
