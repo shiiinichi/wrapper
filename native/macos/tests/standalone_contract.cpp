@@ -132,6 +132,14 @@ void standaloneTests(Report &r, const fs::path &build, const fs::path &assets) {
                                           httplib::Headers{{"Host", "public.example"}}})
             require(envelope(client.Get("/status", h))["code"] == 403, "unexpectedly accepted client");
     });
+    r.run("signed-out HTTP requests preserve the authentication envelope", [&] {
+        for (auto route : {"/m3u8", "/lyrics", "/webplayback", "/assets", "/key"}) {
+            auto path = std::string(route) + "?adamId=123&uri=skd%3A%2F%2Ftest%2Fkey";
+            require(envelope(client.Get(path))["code"] == 401, "missing account became a backend failure");
+        }
+        require(envelope(client.Post("/license", R"({"adamId":"123","challenge":"QQ==","uri":"skd://test/key"})",
+                                     "application/json"))["code"] == 401, "license account code");
+    });
     r.run("early rejection closes before an unread body can become a request", [&] {
         const std::string inner = "GET /status HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n";
         auto header = [](size_t size) {

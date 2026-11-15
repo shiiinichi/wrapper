@@ -1,4 +1,5 @@
 #include "native_api.h"
+#include "worker_protocol.h"
 #include "device_asset.h"
 #include "music_client.h"
 #include "auth_input.h"
@@ -360,10 +361,11 @@ bool readFrame(Bytes& result) {
     if (std::fread(result.data(), 1, size, stdin) != size) throw std::runtime_error("truncated worker frame");
     return true;
 }
-void writeFrame(bool success, const Bytes& result) {
+struct NoSavedAccount {};
+void writeFrame(WorkerStatus status, const Bytes& result) {
     Bytes header;
     appendWord(header, static_cast<uint32_t>(result.size() + 1));
-    header.push_back(success ? 0 : 1);
+    header.push_back(static_cast<uint8_t>(status));
     if (std::fwrite(header.data(), 1, header.size(), stdout) != header.size() ||
         std::fwrite(result.data(), 1, result.size(), stdout) != result.size() || std::fflush(stdout))
         throw std::runtime_error("worker response pipe closed");
@@ -409,7 +411,7 @@ void nativeDecryptionWorker(Loader& loader, const std::string& directory, bool e
     if (!embedded && !accountPresent(loader, services)) throw std::runtime_error("no saved account");
     std::vector<std::unique_ptr<NativeContext>> contexts;
     DeviceManifestSession manifest;
-    writeFrame(true, Bytes{'N', 'A', 'D', '2'});
+    writeFrame(WorkerStatus::success, Bytes{'N', 'A', 'D', '2'});
     Bytes request;
     while (readFrame(request)) {
         try {
@@ -417,7 +419,7 @@ void nativeDecryptionWorker(Loader& loader, const std::string& directory, bool e
             auto operation = input.word();
             Bytes response;
             if (operation == 1) {
-                if (!accountPresent(loader, services)) throw std::runtime_error("no saved account");
+                if (!accountPresent(loader, services)) throw NoSavedAccount{};
                 auto adam = input.string(19), uri = input.string(8192);
                 input.end();
                 if (contexts.size() >= 64) throw std::runtime_error("native context capacity reached");
@@ -459,21 +461,23 @@ void nativeDecryptionWorker(Loader& loader, const std::string& directory, bool e
                 response.assign(json.begin(), json.end());
             } else if (embedded && operation == 5) {
                 input.end();
-                if (!accountPresent(loader, services)) throw std::runtime_error("no saved account");
+                if (!accountPresent(loader, services)) throw NoSavedAccount{};
                 auto json = tokens(loader, services);
                 response.assign(json.begin(), json.end());
             } else if (embedded && operation == 6) {
                 auto adam = input.string(19);
                 input.end();
                 (void)subscriptionSongID(adam);
-                if (!accountPresent(loader, services)) throw std::runtime_error("no saved account");
+                if (!accountPresent(loader, services)) throw NoSavedAccount{};
                 auto json = deviceManifest(loader, services, adam, manifest);
                 response.assign(json.begin(), json.end());
             } else throw std::runtime_error("unknown native sample operation");
-            writeFrame(true, response);
+            writeFrame(WorkerStatus::success, response);
+        } catch (const NoSavedAccount&) {
+            writeFrame(WorkerStatus::noAccount, {});
         } catch (const std::exception&) {
             // No keys, input samples, account identifiers, or guest errors enter diagnostics.
-            writeFrame(false, {});
+            writeFrame(WorkerStatus::rejected, {});
         }
     }
 }

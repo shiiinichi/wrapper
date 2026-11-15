@@ -267,7 +267,7 @@ Json Service::credentials(const NMWOperation &op, bool webRequired) {
     auto user = field(tokens, "music_token");
     for (const auto *s : {&user, &bearer})
         if (s->empty() || s->size() > 128 * 1024 || s->find_first_of("\r\n") != std::string::npos)
-            fail(NMW_MESSAGE, "Native account tokens are unavailable. Sign in again.");
+            fail(NMW_NO_ACCOUNT);
     return {{"bearer", bearer}, {"user", user}, {"storefront", field(tokens, "storefront")}};
 }
 Json Service::webRoute(const std::string &route, const std::string &id, const Json &q, const Bytes &body,
@@ -307,7 +307,7 @@ Json Service::webRoute(const std::string &route, const std::string &id, const Js
     if (route == "/lyrics") {
         if (region.size() != 2 ||
             !std::all_of(region.begin(), region.end(), [](unsigned char c) { return std::isalpha(c) && c < 128; }))
-            fail(NMW_MESSAGE, "The native account storefront is unavailable.");
+            fail(NMW_NO_ACCOUNT);
         auto language = field(q, "language", "en"), script = field(q, "script", "en-Latn");
         request.url = amp + "catalog/" + region + "/songs/" + id +
                       "/syllable-lyrics?l%5Blyrics%5D=" + urlEncode(language) +
@@ -338,10 +338,19 @@ Json Service::webRoute(const std::string &route, const std::string &id, const Js
             request.body = Json{{"salableAdamId", id}}.dump();
         }
     }
-    auto root = json(fetch(request, op));
+    Json root;
+    try {
+        root = json(fetch(request, op));
+    } catch (const Failure &error) {
+        if (error.code == NMW_HTTP_BASE + 404 && (route == "/lyrics" || route == "/webplayback"))
+            fail(NMW_NOT_FOUND, "Content was not found.");
+        throw;
+    }
     if (hasErrors(root))
         fail(NMW_MESSAGE, "Apple rejected the request.");
     if (route == "/lyrics") {
+        if (root.contains("data") && root["data"].is_array() && root["data"].empty())
+            fail(NMW_NOT_FOUND, "Lyrics were not found.");
         const auto &item = firstItem(root, "data");
         if (!item.contains("attributes"))
             fail(NMW_INVALID);
@@ -354,7 +363,7 @@ Json Service::webRoute(const std::string &route, const std::string &id, const Js
         if (!words)
             lyrics = lyrics.empty() ? field(a, "text") : lineLyrics(std::move(lyrics));
         if (lyrics.empty())
-            fail(NMW_MESSAGE, "Lyrics were not found.");
+            fail(NMW_NOT_FOUND, "Lyrics were not found.");
         return {{"adamId", id}, {"syllable", words ? "true" : "false"}, {"lyrics", lyrics}};
     }
     if (route == "/assets") {
@@ -375,6 +384,8 @@ Json Service::webRoute(const std::string &route, const std::string &id, const Js
                 {"license", value},
                 {"renew", root.contains("renew-after") ? root["renew-after"] : Json(0)}};
     }
+    if (root.contains("songList") && root["songList"].is_array() && root["songList"].empty())
+        fail(NMW_NOT_FOUND, "Web playback is unavailable for this track.");
     const auto &song = firstItem(root, "songList");
     if (song.contains("songId")) {
         auto found = song["songId"].is_string() ? song["songId"].get<std::string>() : song["songId"].dump();
@@ -394,7 +405,7 @@ Json Service::webRoute(const std::string &route, const std::string &id, const Js
                 aac = url;
         }
     if (hls.empty() && aac.empty())
-        fail(NMW_MESSAGE, "Web playback is unavailable for this track.");
+        fail(NMW_NOT_FOUND, "Web playback is unavailable for this track.");
     Json result = {{"adamId", id},
                    {"m3u8", hls.empty() ? aac : hls},
                    {"streamType", hls.empty() ? "aac-cenc" : "hls"},

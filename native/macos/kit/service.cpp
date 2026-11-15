@@ -306,7 +306,17 @@ Reply Service::send(const std::string &route, const Json &q, const Bytes &body, 
     Admission acquired(artist ? artistGate : gate, op);
     accountAvailable();
     check(op);
-    auto result = perform(route, q, body, token, op);
+    Reply result;
+    try {
+        result = perform(route, q, body, token, op);
+    } catch (const Failure &error) {
+        check(op);
+        if (error.code == NMW_NO_ACCOUNT)
+            return reply(nullptr, 401, "No saved account or account tokens; sign in first.");
+        if (error.code == NMW_NOT_FOUND)
+            return reply(nullptr, 404, error.message);
+        throw;
+    }
     check(op);
     return result;
 }

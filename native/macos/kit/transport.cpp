@@ -1,4 +1,5 @@
 #include "runtime.h"
+#include "../worker_protocol.h"
 #include <curl/curl.h>
 #include <algorithm>
 #include <cerrno>
@@ -357,7 +358,9 @@ Bytes Worker::readFrame(const NMWOperation &op, Clock::time_point deadline) {
         fail(NMW_INVALID);
     Bytes result(n);
     readAll(child.output, result.data(), n, op, deadline);
-    if (result.front() != 0)
+    if (result.front() == static_cast<uint8_t>(native_poc::WorkerStatus::noAccount) && result.size() == 1)
+        fail(NMW_NO_ACCOUNT);
+    if (result.front() != static_cast<uint8_t>(native_poc::WorkerStatus::success))
         fail(NMW_REJECTED);
     result.erase(result.begin());
     return result;

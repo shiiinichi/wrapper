@@ -17,6 +17,7 @@ struct Fixture {
     int version = 1;
     uint32_t next = 0;
     bool broken = false;
+    bool account = true;
     static int32_t invoke(void *ptr, int32_t kind, const NMWOperation *, const uint8_t *raw, size_t n,
                           NMWBytes *output) {
         auto &f = *static_cast<Fixture *>(ptr);
@@ -44,6 +45,8 @@ struct Fixture {
             } else if (kind == NMW_WORKER) {
                 auto cmd = word(data, 0);
                 f.commands.push_back(cmd);
+                if (!f.account && (cmd == 1 || cmd == 5 || cmd == 6))
+                    return NMW_NO_ACCOUNT;
                 if (cmd == 4)
                     out = bytes(Json{{"backend", "macos-arm64"}, {"account_present", true}, {"regions", {"ph"}}});
                 else if (cmd == 5)
@@ -101,6 +104,18 @@ Bytes samples() {
     return b;
 }
 void outputs(Report &r) {
+    r.run("authentication and missing-content errors retain their envelope codes", [] {
+        Env e;
+        e.fixture.account = false;
+        require(e.manifest()["code"] == 401, "missing account code");
+        e.fixture.account = true;
+        e.fixture.api = {{"data", Json::array()}};
+        require(e.send("/lyrics", {{"adamId", "123"}}).envelope["code"] == 404, "empty lyrics code");
+        e.fixture.api = {{"data", Json::array({Json{{"attributes", Json::object()}}})}};
+        require(e.send("/lyrics", {{"adamId", "123"}}).envelope["code"] == 404, "absent lyrics code");
+        e.fixture.api = {{"songList", Json::array()}};
+        require(e.send("/webplayback", {{"adamId", "123"}}).envelope["code"] == 404, "empty playback code");
+    });
     r.run("failed playback leases remain retryable and successful leases are reused", [] {
         native_poc::DeviceManifestSession session;
         unsigned calls = 0;
