@@ -37,14 +37,68 @@ bool singleValue(sqlite3 *database, const char *sql, const char *expected) {
     return value && std::strcmp(reinterpret_cast<const char *>(value), expected) == 0 &&
            sqlite3_step(raw) == SQLITE_DONE;
 }
+bool hasColumns(sqlite3 *database, const char *sql) {
+    sqlite3_stmt *raw = nullptr;
+    int code = sqlite3_prepare_v2(database, sql, -1, &raw, nullptr);
+    sqlite3_finalize(raw);
+    return code == SQLITE_OK;
+}
+void validateAccountSchema(sqlite3 *database) {
+    if (!singleValue(database, "SELECT type FROM sqlite_master WHERE name='account'", "table") ||
+        !singleValue(database, "SELECT type FROM sqlite_master WHERE name='profile'", "table") ||
+        !hasColumns(database, "SELECT active, creditString, dsid, firstName, id, im_can_subscribe, "
+                              "im_subscribed, im_supported, lastName, storeFront FROM account LIMIT 0") ||
+        !hasColumns(database, "SELECT entityId, entityType, name, handle, bio, profileImage, backgroundImage, "
+                              "isVerified, isFollowable, autoFollowEnable FROM profile LIMIT 0"))
+        fail(NMW_MESSAGE, "The imported account database has an unsupported schema.");
+    sqlite3_stmt *raw = nullptr;
+    int code = sqlite3_prepare_v2(database, "PRAGMA user_version", -1, &raw, nullptr);
+    std::unique_ptr<sqlite3_stmt, decltype(&sqlite3_finalize)> version(raw, sqlite3_finalize);
+    if (code != SQLITE_OK || sqlite3_step(raw) != SQLITE_ROW)
+        fail(NMW_INVALID);
+    int number = sqlite3_column_int(raw, 0);
+    version.reset();
+    if (number < 0)
+        fail(NMW_INVALID);
+    if (number < 4) {
+        // These are the additive migrations in the pinned SDK's AccountStore
+        // and UserProfileStore. Apply them only to the staged copy.
+        const char *profileColumns[] = {
+            "isPrivate INTEGER NOT NULL DEFAULT 0", "isOnBoarded INTEGER NOT NULL DEFAULT 0",
+            "discoverabilityConsentVersion INTEGER NOT NULL DEFAULT 0",
+            "isDiscoverableByContact INTEGER NOT NULL DEFAULT 0",
+            "isContactsCheckAllowed INTEGER NOT NULL DEFAULT 0", "socialProfileId TEXT NOT NULL DEFAULT ''",
+            "isOnboardingBlocked INTEGER NOT NULL DEFAULT 0"};
+        auto execute = [&](const std::string &sql) {
+            if (sqlite3_exec(database, sql.c_str(), nullptr, nullptr, nullptr) != SQLITE_OK)
+                fail(NMW_MESSAGE, "The staged account schema could not be upgraded.");
+        };
+        auto add = [&](const char *table, const std::string &definition) {
+            auto column = definition.substr(0, definition.find(' '));
+            auto query = "SELECT " + column + " FROM " + table + " LIMIT 0";
+            if (!hasColumns(database, query.c_str()))
+                execute("ALTER TABLE " + std::string(table) + " ADD COLUMN " + definition);
+        };
+        execute("BEGIN IMMEDIATE");
+        add("account", "accountFlags TEXT");
+        for (auto definition : profileColumns) add("profile", definition);
+        execute("PRAGMA user_version=4");
+        execute("COMMIT");
+    }
+    if (!hasColumns(database, "SELECT accountFlags FROM account LIMIT 0") ||
+        !hasColumns(database, "SELECT isPrivate, isOnBoarded, isDiscoverableByContact, isContactsCheckAllowed, "
+                              "discoverabilityConsentVersion, socialProfileId FROM profile LIMIT 0"))
+        fail(NMW_MESSAGE, "The imported account database is missing SDK columns.");
+}
 void validateDatabase(const fs::path &path, bool account) {
     sqlite3 *raw = nullptr;
-    int code = sqlite3_open_v2(path.c_str(), &raw, SQLITE_OPEN_READONLY, nullptr);
+    int code = sqlite3_open_v2(path.c_str(), &raw, account ? SQLITE_OPEN_READWRITE : SQLITE_OPEN_READONLY, nullptr);
     std::unique_ptr<sqlite3, decltype(&sqlite3_close)> database(raw, sqlite3_close);
     if (code != SQLITE_OK || !singleValue(raw, "PRAGMA quick_check", "ok"))
         fail(NMW_MESSAGE, "The imported account contains an invalid database.");
+    if (account) validateAccountSchema(raw);
     if (account && !singleValue(raw,
-            "SELECT 1 FROM account WHERE active = 1 AND dsid > 0 "
+            "SELECT 1 FROM account WHERE active = 1 AND typeof(dsid) = 'integer' AND dsid > 0 "
             "AND typeof(id) = 'text' AND length(id) > 0 LIMIT 1", "1"))
         fail(NMW_MESSAGE, "The imported profile has no usable saved account.");
 }

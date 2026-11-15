@@ -467,7 +467,7 @@ void outputs(Report &r) {
 void loaderTests(Report &, const fs::path &, const fs::path &, const fs::path &);
 void standaloneTests(Report &, const fs::path &, const fs::path &);
 void assetTests(Report &, const fs::path &, const fs::path &);
-void profileTests(Report &);
+void profileTests(Report &, const fs::path &, const fs::path &);
 int main(int argc, char **argv) {
     if (argc == 3 && std::string(argv[1]) == "--inheritance-fixture") {
         std::string input;
@@ -482,8 +482,8 @@ int main(int argc, char **argv) {
         return 2;
     Report r;
     outputs(r);
-    profileTests(r);
     fs::path build = fs::absolute(argv[1]), assets = fs::absolute(argv[2]), fixture = fs::absolute(argv[3]);
+    profileTests(r, build / "wrapper-native-poc", assets);
     loaderTests(r, build / "wrapper-native-poc", assets, fixture);
     standaloneTests(r, build, assets);
     assetTests(r, build, assets);
