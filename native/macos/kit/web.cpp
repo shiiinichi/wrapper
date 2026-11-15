@@ -174,7 +174,7 @@ Json artist(const Json &root, const std::string &id, const std::string &region) 
     if (landscape.is_null() && a.contains("hero") && a["hero"].is_array() && !a["hero"].empty()) {
         const auto &hero = a["hero"][0];
         if (hero.is_object() && hero.contains("content") && hero["content"].is_array() &&
-            !hero["content"].empty()) {
+            !hero["content"].empty() && hero["content"][0].is_object()) {
             auto picture = hero["content"][0].value("artwork", Json(nullptr));
             if (picture.is_object() && picture.contains("recommendedCropCodes") &&
                 picture["recommendedCropCodes"].is_array() &&

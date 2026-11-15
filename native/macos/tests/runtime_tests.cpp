@@ -107,6 +107,24 @@ Bytes samples() {
     return b;
 }
 void outputs(Report &r) {
+    r.run("malformed optional hero artwork preserves valid artist metadata", [] {
+        Env e;
+        e.fixture.api = {{"data", Json::array({Json{{"id", "123"}, {"type", "artists"},
+                    {"attributes", {{"name", "Fixture Artist"}}}}})}};
+        auto &attributes = e.fixture.api["data"][0]["attributes"];
+        for (const auto &content : {Json(nullptr), Json(42), Json("wrong type"), Json::array(), Json::object()}) {
+            attributes["hero"] = Json::array({Json{{"content", Json::array({content})}}});
+            auto result = e.send("/artist", {{"adamId", "123"}}).envelope;
+            require(result["code"] == 0 && result["data"]["name"] == "Fixture Artist" &&
+                        result["data"]["wideArtwork"].is_null(), "optional hero rejected artist");
+        }
+        attributes["hero"] = Json::array({Json{{"content", Json::array({Json{{"artwork",
+            {{"width", 100}, {"height", 100}, {"url", "https://is1-ssl.mzstatic.com/image/{w}x{h}bb.jpg"},
+             {"recommendedCropCodes", Json::array({"vf"})}}}}})}}});
+        auto wide = e.send("/artist", {{"adamId", "123"}}).envelope["data"]["wideArtwork"];
+        require(wide["width"] == 1600 && wide["height"] == 900 &&
+                    wide["url"] == "https://is1-ssl.mzstatic.com/image/1600x900vf.jpg", "valid hero was lost");
+    });
     r.run("artist not found applies only to catalog lookup failures", [] {
         for (auto url : {"https://music.apple.com", "https://music.apple.com/assets/index~test.js"}) {
             Env e;
