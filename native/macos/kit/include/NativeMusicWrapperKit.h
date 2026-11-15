@@ -51,6 +51,7 @@ NMWReply nmw_send(NMWRuntime *runtime, NMWOperation *operation, const char *rout
 // stopped profile. A released account invalidates cached tokens and keys.
 int32_t nmw_begin_account(NMWRuntime *runtime, NMWOperation *operation);
 void nmw_end_account(NMWRuntime *runtime);
+// Wait for admitted work to drain, then close the worker before returning.
 void nmw_close_worker(NMWRuntime *runtime);
 size_t nmw_pending_requests(NMWRuntime *runtime);
 int32_t nmw_import_profile(const char *source, const char *destination);

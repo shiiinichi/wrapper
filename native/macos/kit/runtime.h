@@ -47,7 +47,7 @@ class Gate {
     std::deque<const NMWOperation *> pending;
 
   public:
-    void acquire(const NMWOperation &operation);
+    void acquire(const NMWOperation &operation, bool waitUntilAvailable = false);
     void release();
     size_t waiting() {
         std::lock_guard<std::mutex> guard(mutex);
@@ -58,7 +58,9 @@ class Admission {
     Gate &gate;
 
   public:
-    Admission(Gate &gate, const NMWOperation &operation) : gate(gate) { gate.acquire(operation); }
+    Admission(Gate &gate, const NMWOperation &operation, bool waitUntilAvailable = false) : gate(gate) {
+        gate.acquire(operation, waitUntilAvailable);
+    }
     ~Admission() { gate.release(); }
 };
 struct PrivateChild {

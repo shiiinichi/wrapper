@@ -104,6 +104,38 @@ Bytes samples() {
     return b;
 }
 void outputs(Report &r) {
+    r.run("worker close completes after work exceeding the request admission deadline", [] {
+        struct Fixture {
+            std::promise<void> entered, release;
+            unsigned closes = 0;
+        } fixture;
+        auto hook = [](void *context, int32_t kind, const NMWOperation *, const uint8_t *, size_t, NMWBytes *out) -> int32_t {
+            auto &f = *static_cast<Fixture *>(context);
+            if (kind == NMW_CLOSE_WORKER) { ++f.closes; return NMW_OK; }
+            if (kind != NMW_WORKER) return NMW_INVALID;
+            f.entered.set_value();
+            f.release.get_future().wait();
+            auto data = bytes(Json{{"account_present", false}});
+            *out = nmw_copy_bytes(data.data(), data.size());
+            return NMW_OK;
+        };
+        auto runtime = nmw_create("", "", "", &fixture, hook);
+        require(runtime != nullptr, "runtime creation");
+        auto active = std::async(std::launch::async, [&] {
+            NMWOperation op;
+            auto result = nmw_send(runtime, &op, "/status", "{}", nullptr, 0, "");
+            nmw_free_bytes(result.metadata); nmw_free_bytes(result.binary);
+            return result.status;
+        });
+        fixture.entered.get_future().wait();
+        auto closing = std::async(std::launch::async, [&] { nmw_close_worker(runtime); });
+        bool returnedEarly = closing.wait_for(std::chrono::milliseconds(5200)) == std::future_status::ready;
+        fixture.release.set_value();
+        auto status = active.get();
+        closing.get();
+        nmw_destroy(runtime);
+        require(!returnedEarly && status == NMW_OK && fixture.closes == 1, "worker close silently dropped");
+    });
     r.run("authentication and missing-content errors retain their envelope codes", [] {
         Env e;
         e.fixture.account = false;

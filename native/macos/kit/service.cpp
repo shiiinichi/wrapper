@@ -63,19 +63,19 @@ std::vector<uint32_t> sampleSizes(const Bytes &data) {
         fail(NMW_INVALID);
     return sizes;
 }
-void Gate::acquire(const NMWOperation &op) {
+void Gate::acquire(const NMWOperation &op, bool waitUntilAvailable) {
     check(op);
     std::unique_lock<std::mutex> guard(mutex);
     if (!occupied && pending.empty()) {
         occupied = true;
         return;
     }
-    if (pending.size() >= 7)
+    if (!waitUntilAvailable && pending.size() >= 7)
         fail(NMW_BUSY);
     pending.push_back(&op);
     const auto deadline = Clock::now() + std::chrono::seconds(5);
     for (;;) {
-        if (op.cancelled || Clock::now() >= deadline) {
+        if (op.cancelled || (!waitUntilAvailable && Clock::now() >= deadline)) {
             pending.erase(std::find(pending.begin(), pending.end(), &op));
             changed.notify_all();
             fail(op.cancelled ? NMW_CANCELLED : NMW_BUSY);
@@ -351,7 +351,7 @@ void Service::endAccount() {
 }
 void Service::closeWorker() {
     NMWOperation op;
-    Admission held(gate, op);
+    Admission held(gate, op, true);
     close(op);
 }
 } // namespace wrapper
