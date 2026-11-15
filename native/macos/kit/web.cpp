@@ -205,7 +205,10 @@ Bytes Service::fetch(const HTTPRequest &value, const NMWOperation &op) {
                     bytes(Json{{"url", request.url}, {"headers", request.headers}, {"body", request.body}}), op);
 }
 std::string Service::webToken(const NMWOperation &op) {
-    std::lock_guard<std::mutex> lock(developerLock);
+    check(op);
+    std::unique_lock<std::timed_mutex> lock(developerLock, std::defer_lock);
+    while (!lock.try_lock_for(std::chrono::milliseconds(25)))
+        check(op);
     check(op);
     if (!developer.empty() && Clock::now() - developerAt < std::chrono::hours(24))
         return developer;

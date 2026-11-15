@@ -343,7 +343,7 @@ void Service::endAccount() {
     contexts.clear();
     opens = 0;
     {
-        std::lock_guard<std::mutex> web(developerLock);
+        std::lock_guard<std::timed_mutex> web(developerLock);
         developer.clear();
     }
     std::lock_guard<std::mutex> lock(accountLock);

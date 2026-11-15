@@ -108,7 +108,8 @@ class Service {
     void *hookContext;
     NMWExternal hook;
     Gate gate, artistGate;
-    std::mutex accountLock, developerLock;
+    std::mutex accountLock;
+    std::timed_mutex developerLock;
     bool changingAccount = false;
     Json tokens;
     Clock::time_point tokenAt{}, developerAt{};

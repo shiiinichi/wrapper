@@ -104,6 +104,43 @@ Bytes samples() {
     return b;
 }
 void outputs(Report &r) {
+    r.run("token-cache waiters cancel independently of an artist refresh", [] {
+        struct Fixture { std::promise<void> entered, tokens, release; } fixture;
+        auto hook = [](void *context, int32_t kind, const NMWOperation *, const uint8_t *, size_t, NMWBytes *out) -> int32_t {
+            auto &f = *static_cast<Fixture *>(context);
+            if (kind == NMW_HTTP) {
+                f.entered.set_value();
+                f.release.get_future().wait();
+                return NMW_UNAVAILABLE;
+            }
+            if (kind != NMW_WORKER) return NMW_INVALID;
+            auto data = bytes(Json{{"storefront", "us"}, {"music_token", "user"}, {"developer_token", "sdk"}});
+            *out = nmw_copy_bytes(data.data(), data.size());
+            f.tokens.set_value();
+            return NMW_OK;
+        };
+        auto runtime = nmw_create("", "", "", &fixture, hook);
+        require(runtime != nullptr, "runtime creation");
+        auto send = [&](const char *route, NMWOperation &operation) {
+            auto reply = nmw_send(runtime, &operation, route, R"({"adamId":"123"})", nullptr, 0, "");
+            nmw_free_bytes(reply.metadata); nmw_free_bytes(reply.binary);
+            return reply.status;
+        };
+        NMWOperation artist, lyrics;
+        auto owner = std::async(std::launch::async, [&] { return send("/artist", artist); });
+        fixture.entered.get_future().wait();
+        auto waiter = std::async(std::launch::async, [&] { return send("/lyrics", lyrics); });
+        fixture.tokens.get_future().wait();
+        bool waiting = waiter.wait_for(std::chrono::milliseconds(100)) == std::future_status::timeout;
+        nmw_operation_cancel(&lyrics);
+        bool prompt = waiter.wait_for(std::chrono::milliseconds(400)) == std::future_status::ready;
+        fixture.release.set_value();
+        auto status = waiter.get();
+        auto ownerStatus = owner.get();
+        nmw_destroy(runtime);
+        require(waiting && prompt && status == NMW_CANCELLED && ownerStatus == NMW_UNAVAILABLE,
+                "cancellation waited for refresh");
+    });
     r.run("worker close completes after work exceeding the request admission deadline", [] {
         struct Fixture {
             std::promise<void> entered, release;
