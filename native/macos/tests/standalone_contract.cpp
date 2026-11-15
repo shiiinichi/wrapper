@@ -179,6 +179,21 @@ void standaloneTests(Report &r, const fs::path &build, const fs::path &assets) {
         require(envelope(client.Post("/decrypt", "abc", "application/json"))["code"] == 400, "type");
         require(envelope(client.Get("/m3u8?adamId=-1"))["code"] == 400, "ID");
     });
+    r.run("decrypt validates the complete media type and parameter syntax", [&] {
+        std::string body(9, '\0');
+        body[3] = body[7] = 1;
+        body[8] = 'x';
+        for (auto type : {"application/octet-stream", "Application/Octet-Stream",
+                          "application/octet-stream; version=1", "application/octet-stream; note=\"a\\\"b\""})
+            require(envelope(client.Post("/decrypt", body, type))["code"] == 409, "valid media type rejected");
+        for (auto type : {"application/octet-streamXYZ", "application/octet-stream/json", "text/plain",
+                          "application/octet-stream;", "application/octet-stream; key",
+                          "application/octet-stream; key=", "application/octet-stream; key=\"unterminated"})
+            require(envelope(client.Post("/decrypt", body, type))["code"] == 400, "invalid media type accepted");
+        auto duplicate = rawRequest(port, "POST /decrypt HTTP/1.1\r\nHost: localhost\r\nContent-Length: 9\r\n"
+                                          "Content-Type: application/octet-stream\r\nContent-Type: text/plain\r\n\r\n");
+        require(duplicate.find("\"code\":400") != duplicate.npos, "duplicate content type accepted");
+    });
     r.run("malformed methods cannot crash or inject data into timing logs", [&] {
         for (const auto &method : {std::string(1, char(0xff)), std::string("private-method-fixture")}) {
             auto response = rawRequest(port, method + " /status HTTP/1.1\r\nHost: localhost\r\n\r\n");

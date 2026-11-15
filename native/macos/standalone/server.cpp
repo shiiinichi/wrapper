@@ -7,6 +7,7 @@
 #include <fcntl.h>
 #include <iostream>
 #include <set>
+#include <string_view>
 #include <thread>
 #include <unistd.h>
 #include <sys/stat.h>
@@ -81,6 +82,55 @@ int envelopeCode(int error) {
         return 502;
     }
 }
+bool binaryContentType(std::string_view value) {
+    size_t at = 0;
+    auto whitespace = [&] {
+        while (at < value.size() && (value[at] == ' ' || value[at] == '\t')) ++at;
+    };
+    auto token = [&] {
+        size_t begin = at;
+        constexpr std::string_view punctuation = "!#$%&'*+-.^_`|~";
+        while (at < value.size()) {
+            auto c = static_cast<unsigned char>(value[at]);
+            if (!((c < 128 && std::isalnum(c)) || punctuation.find(c) != punctuation.npos)) break;
+            ++at;
+        }
+        return value.substr(begin, at - begin);
+    };
+    auto equal = [](std::string_view actual, std::string_view expected) {
+        return actual.size() == expected.size() &&
+               std::equal(actual.begin(), actual.end(), expected.begin(),
+                          [](unsigned char a, unsigned char b) { return std::tolower(a) == b; });
+    };
+    whitespace();
+    if (!equal(token(), "application") || at == value.size() || value[at++] != '/') return false;
+    if (!equal(token(), "octet-stream")) return false;
+    whitespace();
+    while (at < value.size()) {
+        if (value[at++] != ';') return false;
+        whitespace();
+        if (token().empty()) return false;
+        whitespace();
+        if (at == value.size() || value[at++] != '=') return false;
+        whitespace();
+        if (at < value.size() && value[at] == '"') {
+            ++at;
+            bool closed = false;
+            while (at < value.size()) {
+                auto c = static_cast<unsigned char>(value[at++]);
+                if (c == '"') { closed = true; break; }
+                if (c == '\\') {
+                    if (at == value.size()) return false;
+                    c = static_cast<unsigned char>(value[at++]);
+                }
+                if (c != '\t' && (c < 32 || c == 127)) return false;
+            }
+            if (!closed) return false;
+        } else if (token().empty()) return false;
+        whitespace();
+    }
+    return true;
+}
 int run(const Options &o) {
     umask(0077);
     std::filesystem::create_directories(o.profile);
@@ -127,6 +177,10 @@ int run(const Options &o) {
                     req.get_header_value("Content-Length") != "0")) {
             return reject(req, res, 400, "GET requests cannot contain a body");
         }
+        if (req.path == "/decrypt" &&
+            (req.get_header_value_count("Content-Type") != 1 ||
+             !binaryContentType(req.get_header_value("Content-Type"))))
+            return reject(req, res, 400, "invalid binary content type");
         return httplib::Server::HandlerResponse::Unhandled;
     });
     server.set_error_handler(
@@ -164,11 +218,6 @@ int run(const Options &o) {
             if (req.has_header("Transfer-Encoding")) {
                 code = 400;
                 fail(NMW_INVALID, "unsupported transfer encoding");
-            }
-            if (route == "/decrypt" &&
-                req.get_header_value("Content-Type").find("application/octet-stream") != 0) {
-                code = 400;
-                fail(NMW_INVALID, "invalid binary content type");
             }
             NMWOperation op;
             auto body = Bytes(req.body.begin(), req.body.end());
