@@ -300,6 +300,8 @@ Json Service::webRoute(const std::string &route, const std::string &id, const Js
         if (body.size() > maxMetadata)
             fail(NMW_OVERSIZED);
         license = json(body);
+        if (license.contains("drm-type") && !license["drm-type"].is_string())
+            fail(NMW_MESSAGE, "drm-type must be wv or pr.");
         auto challenge = field(license, "challenge"), uri = field(license, "uri"),
              drm = field(license, "drm-type", "wv");
         if (!validID(field(license, "adamId")) || !validChallenge(challenge, uri, drm))

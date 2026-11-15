@@ -107,6 +107,25 @@ Bytes samples() {
     return b;
 }
 void outputs(Report &r) {
+    r.run("license DRM types reject supplied invalid values before external work", [] {
+        for (const auto &drm : {Json(nullptr), Json(123), Json(true), Json::object(), Json::array(),
+                               Json(""), Json("widevine"), Json("WV")}) {
+            Env e;
+            rejects([&] { e.send("/license", Json::object(), bytes(Json{
+                {"adamId", "123"}, {"challenge", "QQ=="}, {"uri", "skd://test/key"}, {"drm-type", drm}})); });
+            require(e.fixture.commands.empty() && e.fixture.requests.empty(), "invalid DRM reached external boundary");
+        }
+        for (auto drm : {"absent", "wv", "pr"}) {
+            Env e;
+            e.fixture.api = {{"license", "fixture-license"}};
+            Json body = {{"adamId", "123"}, {"challenge", "QQ=="}, {"uri", "skd://test/key"}};
+            if (std::string(drm) != "absent") body["drm-type"] = drm;
+            require(e.send("/license", Json::object(), bytes(body)).envelope["code"] == 0, "valid DRM rejected");
+            auto sent = Json::parse(e.fixture.requests.back()["body"].get<std::string>());
+            require(sent["key-system"] == (std::string(drm) == "pr" ? "com.microsoft.playready" : "com.widevine.alpha"),
+                    "wrong key system");
+        }
+    });
     r.run("malformed optional hero artwork preserves valid artist metadata", [] {
         Env e;
         e.fixture.api = {{"data", Json::array({Json{{"id", "123"}, {"type", "artists"},
