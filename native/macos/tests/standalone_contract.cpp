@@ -27,6 +27,40 @@ int runAsset(const fs::path &tool, const fs::path &src, const fs::path &dst) {
     Process p({tool.string(), src.string(), dst.string()}, t.path);
     return p.wait();
 }
+std::string rawRequest(int port, const std::string &request) {
+    struct Socket {
+        int fd = socket(AF_INET, SOCK_STREAM, 0);
+        ~Socket() { if (fd >= 0) close(fd); }
+    } connection;
+    require(connection.fd >= 0, "socket");
+    timeval timeout{3, 0};
+    int noSignal = 1;
+    setsockopt(connection.fd, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout));
+    setsockopt(connection.fd, SOL_SOCKET, SO_SNDTIMEO, &timeout, sizeof(timeout));
+    setsockopt(connection.fd, SOL_SOCKET, SO_NOSIGPIPE, &noSignal, sizeof(noSignal));
+    sockaddr_in address{};
+    address.sin_family = AF_INET;
+    address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    address.sin_port = htons(port);
+    require(!connect(connection.fd, reinterpret_cast<sockaddr *>(&address), sizeof(address)), "connect");
+    size_t sent = 0;
+    while (sent < request.size()) {
+        auto n = send(connection.fd, request.data() + sent, request.size() - sent, 0);
+        if (n < 0 && errno == EINTR) continue;
+        require(n > 0, "send request");
+        sent += static_cast<size_t>(n);
+    }
+    std::string response;
+    char buffer[4096];
+    for (;;) {
+        auto n = recv(connection.fd, buffer, sizeof(buffer), 0);
+        if (n < 0 && errno == EINTR) continue;
+        if (!n || (n < 0 && errno == ECONNRESET)) break;
+        require(n > 0, "response did not close");
+        response.append(buffer, static_cast<size_t>(n));
+    }
+    return response;
+}
 } // namespace
 void standaloneTests(Report &r, const fs::path &build, const fs::path &assets) {
     Temp t;
@@ -59,6 +93,20 @@ void standaloneTests(Report &r, const fs::path &build, const fs::path &assets) {
         for (const httplib::Headers &h : {httplib::Headers{{"Origin", "https://example.invalid"}},
                                           httplib::Headers{{"Host", "public.example"}}})
             require(envelope(client.Get("/status", h))["code"] == 403, "unexpectedly accepted client");
+    });
+    r.run("early rejection closes before an unread body can become a request", [&] {
+        const std::string inner = "GET /status HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n";
+        auto header = [](size_t size) {
+            return "POST /license HTTP/1.1\r\nHost: localhost\r\nOrigin: https://example.invalid\r\n"
+                   "Content-Length: " + std::to_string(size) + "\r\n\r\n";
+        };
+        size_t size = 4096 + inner.size();
+        for (int i = 0; i < 4; ++i) size = 4096 - header(size).size() + inner.size();
+        auto prefix = header(size);
+        auto response = rawRequest(port, prefix + std::string(4096 - prefix.size(), 'A') + inner);
+        require(response.find("\"code\":403") != response.npos, "missing origin rejection");
+        require(response.find("HTTP/1.1 ", 1) == response.npos &&
+                    response.find("server_instance") == response.npos, "body was dispatched");
     });
     r.run("standalone rejects unknown routes, wrong method, duplicate parameters and invalid JSON", [&] {
         require(envelope(client.Get("/unknown"))["code"] == 404, "unknown endpoint");

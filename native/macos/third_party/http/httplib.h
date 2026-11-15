@@ -7052,6 +7052,11 @@ Server::process_request(Stream &strm, const std::string &remote_addr,
   Request req;
 
   Response res;
+  auto close_response_connection = detail::scope_exit([&] {
+    if (res.get_header_value("Connection") == "close") {
+      connection_closed = true;
+    }
+  });
   res.version = "HTTP/1.1";
   res.headers = default_headers_;
 
