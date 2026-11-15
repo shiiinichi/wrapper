@@ -160,6 +160,11 @@ void standaloneTests(Report &r, const fs::path &build, const fs::path &assets) {
         require(envelope(client.Get("/m3u8?adamId=1&adamId=2"))["code"] == 400, "duplicate");
         require(envelope(client.Post("/license", "{", "application/json"))["code"] == 400, "bad JSON");
     });
+    r.run("identical and encoded duplicate query parameters remain visible to validation", [&] {
+        for (auto query : {"a=one&a=one", "a=one&a=two", "a=one&%61=one", "a=one&a=%6fne", "a=&a="})
+            require(envelope(client.Get(std::string("/status?") + query))["code"] == 400, "duplicate was collapsed");
+        require(envelope(client.Get("/status?a=one"))["code"] == 0, "single parameter rejected");
+    });
     r.run("unsupported methods and routes are rejected before reading a body", [&] {
         for (auto method : {"PUT", "PATCH", "DELETE"}) {
             auto response = rawRequest(port, std::string(method) + " /status HTTP/1.1\r\nHost: localhost\r\n\r\n");

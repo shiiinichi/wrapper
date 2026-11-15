@@ -4687,12 +4687,7 @@ inline std::string params_to_query_str(const Params &params) {
 
 inline void parse_query_text(const char *data, std::size_t size,
                              Params &params) {
-  std::set<std::string> cache;
   split(data, data + size, '&', [&](const char *b, const char *e) {
-    std::string kv(b, e);
-    if (cache.find(kv) != cache.end()) { return; }
-    cache.insert(std::move(kv));
-
     std::string key;
     std::string val;
     divide(b, static_cast<std::size_t>(e - b), '=',
