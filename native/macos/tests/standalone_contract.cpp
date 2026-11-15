@@ -152,6 +152,16 @@ void standaloneTests(Report &r, const fs::path &build, const fs::path &assets) {
         require(envelope(client.Get("/m3u8?adamId=1&adamId=2"))["code"] == 400, "duplicate");
         require(envelope(client.Post("/license", "{", "application/json"))["code"] == 400, "bad JSON");
     });
+    r.run("unsupported methods and routes are rejected before reading a body", [&] {
+        for (auto method : {"PUT", "PATCH", "DELETE"}) {
+            auto response = rawRequest(port, std::string(method) + " /status HTTP/1.1\r\nHost: localhost\r\n\r\n");
+            require(response.find("\"code\":405") != response.npos, "lengthless method read its body");
+        }
+        auto unknown = rawRequest(port, "POST /unknown HTTP/1.1\r\nHost: localhost\r\nContent-Length: 999999999\r\n\r\n");
+        require(unknown.find("\"code\":404") != unknown.npos, "unknown route read its body");
+        auto get = rawRequest(port, "GET /status HTTP/1.1\r\nHost: localhost\r\nContent-Length: 20\r\n\r\n");
+        require(get.find("\"code\":400") != get.npos, "GET accepted an unread body");
+    });
     r.run("invalid binary and identity input never succeeds", [&] {
         require(envelope(client.Post("/decrypt", "abc", "application/json"))["code"] == 400, "type");
         require(envelope(client.Get("/m3u8?adamId=-1"))["code"] == 400, "ID");

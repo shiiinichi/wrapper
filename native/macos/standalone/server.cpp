@@ -108,6 +108,10 @@ int run(const Options &o) {
         host = host.substr(0, host.find(':'));
         if ((host != "127.0.0.1" && host != "localhost") || req.has_header("Origin"))
             return reject(req, res, 403, "Local clients only");
+        if (!routes.count(req.path))
+            return reject(req, res, 404, "not found");
+        if (req.method != ((req.path == "/license" || req.path == "/decrypt") ? "POST" : "GET"))
+            return reject(req, res, 405, "method not allowed");
         if (req.has_header("Transfer-Encoding"))
             return reject(req, res, 400, "Unsupported transfer encoding");
         if (req.method == "POST") {
@@ -118,6 +122,10 @@ int run(const Options &o) {
                 return reject(req, res, 400, "Invalid content length");
             if (std::stoull(size) > (req.path == "/decrypt" ? maxBody : maxMetadata))
                 return reject(req, res, 413, "Request is too large");
+        } else if (req.has_header("Content-Length") &&
+                   (req.get_header_value_count("Content-Length") != 1 ||
+                    req.get_header_value("Content-Length") != "0")) {
+            return reject(req, res, 400, "GET requests cannot contain a body");
         }
         return httplib::Server::HandlerResponse::Unhandled;
     });
