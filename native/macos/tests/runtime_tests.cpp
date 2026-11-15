@@ -313,6 +313,15 @@ void standaloneTests(Report &, const fs::path &, const fs::path &);
 void assetTests(Report &, const fs::path &, const fs::path &);
 void profileTests(Report &);
 int main(int argc, char **argv) {
+    if (argc == 3 && std::string(argv[1]) == "--inheritance-fixture") {
+        std::string input;
+        std::getline(std::cin, input);
+        std::cout << Json{{"input", input},
+                          {"descriptor", fcntl(std::stoi(argv[2]), F_GETFD) >= 0},
+                          {"environment", std::getenv("WRAPPER_TEST_PARENT_SECRET") != nullptr},
+                          {"path", std::getenv("PATH") ? std::getenv("PATH") : ""}}.dump();
+        return 0;
+    }
     if (argc != 4)
         return 2;
     Report r;

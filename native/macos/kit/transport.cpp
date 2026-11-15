@@ -12,7 +12,6 @@
 #include <sys/file.h>
 #include <sys/wait.h>
 #include <unistd.h>
-extern char **environ;
 
 namespace wrapper {
 bool mayRetryTLSWithSystemDefault(int result, size_t bytes) {
@@ -258,6 +257,18 @@ size_t pipeReadSome(int fd, uint8_t *dest, size_t n, const NMWOperation &op, Clo
     }
 }
 void PrivateChild::spawn(const std::vector<std::string> &args) {
+    std::vector<std::string> environment = {"PATH=/usr/bin:/bin:/usr/sbin:/sbin", "LANG=en_US.UTF-8"};
+    for (auto name : {"HOME", "TMPDIR"})
+        if (auto value = std::getenv(name))
+            environment.push_back(std::string(name) + "=" + value);
+    std::vector<char *> env;
+    for (auto &value : environment)
+        env.push_back(value.data());
+    env.push_back(nullptr);
+    std::vector<char *> av;
+    for (const auto &s : args)
+        av.push_back(const_cast<char *>(s.c_str()));
+    av.push_back(nullptr);
     int in[2], out[2];
     if (pipe(in))
         fail(NMW_UNAVAILABLE);
@@ -276,12 +287,16 @@ void PrivateChild::spawn(const std::vector<std::string> &args) {
             rc = posix_spawn_file_actions_adddup2(&actions, out[1], STDOUT_FILENO);
         if (!rc)
             rc = posix_spawn_file_actions_addopen(&actions, STDERR_FILENO, "/dev/null", O_WRONLY, 0);
-        std::vector<char *> av;
-        for (const auto &s : args)
-            av.push_back(const_cast<char *>(s.c_str()));
-        av.push_back(nullptr);
-        if (!rc)
-            rc = posix_spawn(&pid, args.at(0).c_str(), &actions, nullptr, av.data(), environ);
+        if (!rc) {
+            posix_spawnattr_t attributes;
+            rc = posix_spawnattr_init(&attributes);
+            if (!rc) {
+                rc = posix_spawnattr_setflags(&attributes, POSIX_SPAWN_CLOEXEC_DEFAULT);
+                if (!rc)
+                    rc = posix_spawn(&pid, args.at(0).c_str(), &actions, &attributes, av.data(), env.data());
+                posix_spawnattr_destroy(&attributes);
+            }
+        }
         posix_spawn_file_actions_destroy(&actions);
     }
     ::close(in[0]);

@@ -63,6 +63,44 @@ std::string rawRequest(int port, const std::string &request) {
 }
 } // namespace
 void standaloneTests(Report &r, const fs::path &build, const fs::path &assets) {
+    r.run("private child inherits only its pipes and selected environment", [&] {
+        struct ParentState {
+            int fd = -1;
+            std::string previous;
+            bool hadPrevious = false;
+            ParentState() {
+                if (auto value = std::getenv("WRAPPER_TEST_PARENT_SECRET")) {
+                    previous = value;
+                    hadPrevious = true;
+                }
+                setenv("WRAPPER_TEST_PARENT_SECRET", "synthetic-secret", 1);
+                fd = fcntl(STDOUT_FILENO, F_DUPFD, 100);
+            }
+            ~ParentState() {
+                if (fd >= 0) close(fd);
+                if (hadPrevious) setenv("WRAPPER_TEST_PARENT_SECRET", previous.c_str(), 1);
+                else unsetenv("WRAPPER_TEST_PARENT_SECRET");
+            }
+        } parent;
+        require(parent.fd >= 0, "inheritable fixture descriptor");
+        wrapper::PrivateChild child;
+        child.spawn({(build / "native-wrapper-tests").string(), "--inheritance-fixture", std::to_string(parent.fd)});
+        NMWOperation operation;
+        auto deadline = wrapper::Clock::now() + std::chrono::seconds(3);
+        const std::string input = "private pipe\n";
+        wrapper::pipeWrite(child.input, reinterpret_cast<const uint8_t *>(input.data()), input.size(), operation, deadline);
+        std::string result;
+        uint8_t buffer[1024];
+        for (;;) {
+            auto count = wrapper::pipeReadSome(child.output, buffer, sizeof(buffer), operation, deadline);
+            if (!count) break;
+            result.append(reinterpret_cast<const char *>(buffer), count);
+        }
+        auto data = Json::parse(result);
+        require(data["input"] == "private pipe" && data["descriptor"] == false &&
+                    data["environment"] == false && data["path"] == "/usr/bin:/bin:/usr/sbin:/sbin",
+                "unexpected child inheritance");
+    });
     Temp t;
     auto profile = t.path / "service";
     auto port = freePort();
