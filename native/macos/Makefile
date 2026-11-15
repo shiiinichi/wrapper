@@ -21,13 +21,13 @@ $(OUT)/wrapper-native-poc: $(WORKER)
 $(OUT)/libNativeMusicWrapperKit.a: $(KIT)
 	xcrun libtool -static -o "$@" $(KIT)
 $(OUT)/native-music-wrapper-server: $(SERVER) $(OUT)/libNativeMusicWrapperKit.a
-	$(CXX) -target arm64-apple-macos15.0 $(SERVER) "$(OUT)/libNativeMusicWrapperKit.a" -lcurl -o "$@"
+	$(CXX) -target arm64-apple-macos15.0 $(SERVER) "$(OUT)/libNativeMusicWrapperKit.a" -lcurl -lsqlite3 -o "$@"
 $(OUT)/NativeMusicWrapper: $(DESKTOP) $(OUT)/libNativeMusicWrapperKit.a
-	$(CXX) -target arm64-apple-macos15.0 $(DESKTOP) "$(OUT)/libNativeMusicWrapperKit.a" -lobjc -lcurl -framework AppKit -framework CoreGraphics -o "$@"
+	$(CXX) -target arm64-apple-macos15.0 $(DESKTOP) "$(OUT)/libNativeMusicWrapperKit.a" -lobjc -lcurl -lsqlite3 -framework AppKit -framework CoreGraphics -o "$@"
 $(OUT)/native-asset-tool: $(OUT)/obj/tools/assets.o
 	$(CXX) -target arm64-apple-macos15.0 "$<" -o "$@"
 $(OUT)/native-endpoint-check: $(OUT)/obj/tools/check_endpoints.o $(OUT)/libNativeMusicWrapperKit.a
-	$(CXX) -target arm64-apple-macos15.0 "$<" "$(OUT)/libNativeMusicWrapperKit.a" -lcurl -o "$@"
+	$(CXX) -target arm64-apple-macos15.0 "$<" "$(OUT)/libNativeMusicWrapperKit.a" -lcurl -lsqlite3 -o "$@"
 $(OUT)/native-wrapper-tests: $(TESTS) $(OUT)/libNativeMusicWrapperKit.a
 	$(CXX) -target arm64-apple-macos15.0 $(TESTS) "$(OUT)/libNativeMusicWrapperKit.a" -lcurl -lsqlite3 -o "$@"
 .PHONY: verify

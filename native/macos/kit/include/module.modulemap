@@ -3,4 +3,5 @@ framework module NativeMusicWrapperKit {
     export *
     link "c++"
     link "curl"
+    link "sqlite3"
 }

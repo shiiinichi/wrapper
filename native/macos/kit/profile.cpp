@@ -4,6 +4,8 @@
 #include <cstring>
 #include <filesystem>
 #include <fcntl.h>
+#include <memory>
+#include <sqlite3.h>
 #include <sys/file.h>
 #include <sys/stat.h>
 #include <unistd.h>
@@ -24,6 +26,27 @@ struct Descriptor {
 bool under(const fs::path &child, const fs::path &parent) {
     auto relative = child.lexically_relative(parent);
     return !relative.empty() && *relative.begin() != "..";
+}
+bool singleValue(sqlite3 *database, const char *sql, const char *expected) {
+    sqlite3_stmt *raw = nullptr;
+    int code = sqlite3_prepare_v2(database, sql, -1, &raw, nullptr);
+    std::unique_ptr<sqlite3_stmt, decltype(&sqlite3_finalize)> statement(raw, sqlite3_finalize);
+    if (code != SQLITE_OK || sqlite3_step(raw) != SQLITE_ROW)
+        return false;
+    auto value = sqlite3_column_text(raw, 0);
+    return value && std::strcmp(reinterpret_cast<const char *>(value), expected) == 0 &&
+           sqlite3_step(raw) == SQLITE_DONE;
+}
+void validateDatabase(const fs::path &path, bool account) {
+    sqlite3 *raw = nullptr;
+    int code = sqlite3_open_v2(path.c_str(), &raw, SQLITE_OPEN_READONLY, nullptr);
+    std::unique_ptr<sqlite3, decltype(&sqlite3_close)> database(raw, sqlite3_close);
+    if (code != SQLITE_OK || !singleValue(raw, "PRAGMA quick_check", "ok"))
+        fail(NMW_MESSAGE, "The imported account contains an invalid database.");
+    if (account && !singleValue(raw,
+            "SELECT 1 FROM account WHERE active = 1 AND dsid > 0 "
+            "AND typeof(id) = 'text' AND length(id) > 0 LIMIT 1", "1"))
+        fail(NMW_MESSAGE, "The imported profile has no usable saved account.");
 }
 bool copyKnown(int folder, const char *name, const fs::path &target, size_t &total) {
     Descriptor source(openat(folder, name, O_RDONLY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK));
@@ -119,6 +142,11 @@ void copyProfile(const std::string &from, const std::string &to) {
             buf, buf + 16, [](char c) { return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f'); }) ||
         !fs::is_regular_file(database / "accounts.sqlitedb"))
         fail(NMW_MESSAGE, "This folder does not contain a native wrapper account.");
+    for (auto name : {"accounts", "cookies", "httpcache", "kvs"}) {
+        auto path = database / (std::string(name) + ".sqlitedb");
+        if (fs::exists(path))
+            validateDatabase(path, std::strcmp(name, "accounts") == 0);
+    }
     if (!marked) {
         Descriptor mark(open((stage / "music-client-v1").c_str(), O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW, 0600));
         if (mark.fd < 0)
