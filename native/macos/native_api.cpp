@@ -1,4 +1,6 @@
 #include "native_api.h"
+#include "device_asset.h"
+#include "music_client.h"
 #include "auth_input.h"
 #include "elf_loader.h"
 #include "format_bridge.h"
@@ -6,12 +8,14 @@
 #include "services.h"
 #include <array>
 #include <algorithm>
+#include <charconv>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <ctime>
 #include <memory>
+#include <optional>
 #include <regex>
 #include <stdexcept>
 #include <vector>
@@ -51,6 +55,138 @@ struct OwnedString {
     ~OwnedString() { fn<void (*)(void*)>(loader, strings, "_ZNSt6__ndk112basic_stringIcNS_11char_traitsIcEENS_9allocatorIcEEED2Ev")(bytes.data()); }
     std::string value() const { return text(bytes.data()); }
 };
+// These SDK getters return owning NDK vectors. Release their shared elements
+// and allocation in the same guest runtime when a reusable worker finishes a request.
+struct AssetItems {
+    GuestShared *begin = nullptr, *end = nullptr, *capacity = nullptr;
+};
+struct OwnedAssetItems {
+    Loader& loader;
+    AssetItems items;
+    explicit OwnedAssetItems(Loader& owner) : loader(owner) {}
+    ~OwnedAssetItems() {
+        for (auto it = items.begin; it != items.end; ++it) if (it->control)
+            fn<void (*)(void*)>(loader, strings, "_ZNSt6__ndk119__shared_weak_count16__release_sharedEv")(it->control);
+        if (items.begin) fn<void (*)(void*)>(loader, strings, "_ZdlPv")(items.begin);
+    }
+};
+struct SubscriptionRequest {
+    Loader& loader;
+    // Pinned PurchaseRequest ABI, as used by wrapper-lite.
+    alignas(16) std::array<unsigned char, 1024> storage{};
+    SubscriptionRequest(Loader& owner, const Services& services) : loader(owner) {
+        fn<void (*)(void*, const GuestShared*)>(loader, store,
+            "_ZN17storeservicescore15PurchaseRequestC2ERKNSt6__ndk110shared_ptrINS_14RequestContextEEE")(storage.data(), &services.context);
+    }
+    ~SubscriptionRequest() {
+        fn<void (*)(void*)>(loader, store, "_ZN17storeservicescore15PurchaseRequestD2Ev")(storage.data());
+    }
+};
+
+int64_t subscriptionSongID(const std::string& adam) {
+    int64_t id = 0;
+    const char* end = adam.data() + adam.size();
+    auto parsed = std::from_chars(adam.data(), end, id);
+    if (adam.size() > 19 || parsed.ec != std::errc{} || parsed.ptr != end || id <= 0)
+        throw std::runtime_error("invalid catalog song ID");
+    return id;
+}
+
+struct OwnedShared {
+    Loader& loader;
+    GuestShared value;
+    explicit OwnedShared(Loader& owner) : loader(owner) {}
+    ~OwnedShared() {
+        if (value.control) fn<void (*)(void*)>(loader, strings, "_ZNSt6__ndk119__shared_weak_count16__release_sharedEv")(value.control);
+    }
+};
+
+// wrapper-lite's offline_available_impl: the second 16-byte subscription status
+// record contains the offline state at byte 8 in the pinned Apple SDK.
+bool hasOfflineChannel(Loader& loader, const Services& services) {
+    OwnedShared fairplay(loader);
+    callGuestReturn(loader.symbol(store, "_ZN17storeservicescore14RequestContext8fairPlayEv"), &fairplay.value, services.context.object);
+    if (!fairplay.value.object) return false;
+    struct { unsigned char *begin{}, *end{}, *capacity{}; } status;
+    callGuestReturn(loader.symbol(store, "_ZN17storeservicescore8FairPlay21getSubscriptionStatusEv"), &status, fairplay.value.object);
+    int state = 0;
+    if (status.begin && status.end - status.begin >= 32) std::memcpy(&state, status.begin + 24, sizeof(state));
+    if (status.begin) fn<void (*)(void*)>(loader, strings, "_ZdlPv")(status.begin);
+    return state == 2 || state == 3;
+}
+
+DeviceAsset subscriptionAsset(Loader& loader, const Services& services, int64_t id) {
+    SubscriptionRequest request(loader, services);
+    auto object = request.storage.data();
+    GuestString key("subDownload");
+    const auto query = "salableAdamId=" + std::to_string(id) + "&price=0&pricingParameters=SUBS&productType=S";
+    GuestString parameters(query.c_str());
+    fn<void (*)(void*, bool)>(loader, store, "_ZN17storeservicescore15PurchaseRequest23setProcessDialogActionsEb")(object, false);
+    fn<void (*)(void*, const GuestString*)>(loader, store, "_ZN17storeservicescore15PurchaseRequest12setURLBagKeyERKNSt6__ndk112basic_stringIcNS1_11char_traitsIcEENS1_9allocatorIcEEEE")(object, &key);
+    fn<void (*)(void*, const GuestString*)>(loader, store, "_ZN17storeservicescore15PurchaseRequest16setBuyParametersERKNSt6__ndk112basic_stringIcNS1_11char_traitsIcEENS1_9allocatorIcEEEE")(object, &parameters);
+    fn<void (*)(void*)>(loader, store, "_ZN17storeservicescore15PurchaseRequest3runEv")(object);
+    auto response = fn<const GuestShared* (*)(void*)>(loader, store, "_ZNK17storeservicescore15PurchaseRequest8responseEv")(object);
+    if (!response || !response->object) return {};
+    auto failure = fn<const GuestShared* (*)(void*)>(loader, store, "_ZN17storeservicescore16PurchaseResponse5errorEv")(response->object);
+    if (failure && failure->object) return {};
+    OwnedAssetItems songs(loader);
+    callGuestReturn(loader.symbol(store, "_ZNK17storeservicescore16PurchaseResponse5itemsEv"), &songs.items, response->object);
+    if (songs.items.begin == songs.items.end || !songs.items.begin->object) return {};
+    auto song = songs.items.begin->object;
+    if (fn<int64_t (*)(void*)>(loader, store, "_ZNK17storeservicescore12PurchaseItem14itemIdentifierEv")(song) != id)
+        throw std::runtime_error("subscription returned a different song");
+    OwnedAssetItems assets(loader);
+    callGuestReturn(loader.symbol(store, "_ZNK17storeservicescore12PurchaseItem6assetsEv"), &assets.items, song);
+    if (assets.items.begin == assets.items.end || !assets.items.end[-1].object) return {};
+    // Upstream returns the final asset of the first item, including a direct
+    // protected file for recordings that do not have an HLS master.
+    auto asset = assets.items.end[-1].object;
+    OwnedString flavor(loader), url(loader);
+    callGuestReturn(loader.symbol(store, "_ZNK17storeservicescore13PurchaseAsset6flavorEv"), flavor.bytes.data(), asset);
+    callGuestReturn(loader.symbol(store, "_ZNK17storeservicescore13PurchaseAsset3URLEv"), url.bytes.data(), asset);
+    return {text(url.bytes.data(), 32 * 1024), flavor.value()};
+}
+
+DeviceAsset playbackAsset(Loader& loader, const Services& services, int64_t id) {
+    // The SDK takes a borrowed NDK vector<string>. Keep the backing string
+    // alive until requestAsset returns and retain its owning response via x8.
+    OwnedString hls(loader, "HLS");
+    auto begin = hls.bytes.data(), end = begin + hls.bytes.size();
+    struct { const unsigned char *begin, *end, *capacity; } flavors{begin, end, end};
+    OwnedShared response(loader);
+    const bool interrupt = false;
+    callGuestReturn(loader.symbol(music, "_ZN22SVPlaybackLeaseManager12requestAssetERKmRKNSt6__ndk16vectorINS2_12basic_stringIcNS2_11char_traitsIcEENS2_9allocatorIcEEEENS7_IS9_EEEERKb"),
+                    &response.value, services.lease, &id, &flavors, &interrupt);
+    if (!response.value.object || !fn<bool (*)(const void*)>(loader, music, "_ZNK23SVPlaybackAssetResponse13hasValidAssetEv")(response.value.object)) return {};
+    auto asset = fn<const GuestShared* (*)(const void*)>(loader, music, "_ZNK23SVPlaybackAssetResponse13playbackAssetEv")(response.value.object);
+    if (!asset || !asset->object) return {};
+    OwnedString url(loader), flavor(loader);
+    callGuestReturn(loader.symbol(store, "_ZNK17storeservicescore13PlaybackAsset9URLStringEv"), url.bytes.data(), asset->object);
+    callGuestReturn(loader.symbol(store, "_ZNK17storeservicescore13PlaybackAsset6flavorEv"), flavor.bytes.data(), asset->object);
+    return {text(url.bytes.data(), 32 * 1024), flavor.value()};
+}
+
+struct DeviceManifestSession {
+    std::optional<bool> offlineChannel;
+    bool requestedPlaybackLease = false;
+};
+std::string deviceManifest(Loader& loader, const Services& services, const std::string& adam, DeviceManifestSession& session) {
+    auto id = subscriptionSongID(adam);
+    if (!session.offlineChannel.has_value()) session.offlineChannel = hasOfflineChannel(loader, services);
+    auto asset = resolveDeviceAsset(*session.offlineChannel,
+        [&] { return subscriptionAsset(loader, services, id); },
+        [&] {
+            if (!session.requestedPlaybackLease) {
+                const bool interrupt = false;
+                fn<void (*)(void*, const bool*)>(loader, music, "_ZN22SVPlaybackLeaseManager12requestLeaseERKb")(services.lease, &interrupt);
+                session.requestedPlaybackLease = true;
+            }
+            return playbackAsset(loader, services, id);
+        });
+    const char* type = asset.flavor == "HLS" ? "hls" : "file";
+    return "{\"adamId\":" + jsonString(adam) + ",\"m3u8\":" + (asset.url.empty() ? "null" : jsonString(asset.url))
+        + ",\"streamType\":" + jsonString(type) + "}";
+}
 void error(Loader& loader, const GuestShared* condition, const char* operation) {
     if (!condition || !condition->object) return;
     auto code = fn<const int* (*)(void*)>(loader, store, "_ZNK17storeservicescore19StoreErrorCondition9errorCodeEv")(condition->object);
@@ -98,7 +234,7 @@ std::string accountStatus(Loader& loader, const Services& services) {
     return "{\"regions\":[" + (account ? jsonString(storefront(loader, services)) : "") +
         "],\"account_present\":" + (account ? "true" : "false") +
         ",\"account_name\":" + jsonString(account ? accountName(loader, account.value.object) : "") +
-        ",\"backend\":\"macos-arm64\",\"temari_compatible\":false,\"native_sample_decryption\":true}";
+        ",\"backend\":\"macos-arm64\",\"native_sample_decryption\":true}";
 }
 std::string signedRequest(Loader& loader, const Services& services, const std::string& url, const std::string& body, bool developer) {
     auto allocation = static_cast<unsigned char*>(std::calloc(1, 512));
@@ -115,7 +251,8 @@ std::string signedRequest(Loader& loader, const Services& services, const std::s
     if (!body.empty()) {
         header("Content-Type", "application/json; charset=UTF-8"); header("Expect", "");
         header("X-Apple-Requesting-Bundle-Id", "com.apple.android.music");
-        header("X-Apple-Requesting-Bundle-Version", "Music/4.9 Android/10 model/Samsung S9 build/7663313 (dt:66)");
+        auto version = music_client::userAgent();
+        header("X-Apple-Requesting-Bundle-Version", version.c_str());
         fn<void (*)(void*, char*, size_t)>(loader, platform, "_ZN13mediaplatform11HTTPMessage11setBodyDataEPcm")(message.object, const_cast<char*>(body.data()), body.size());
     }
     GuestShared request;
@@ -160,15 +297,20 @@ std::string tokens(Loader& loader, const Services& services) {
 }
 }
 std::string nativeApi(Loader& loader, const std::string& directory, const std::string& operation, const std::string& adam, const std::string& uri) {
-    if (operation != "status" && operation != "tokens" && operation != "key") throw std::runtime_error("unknown native API operation");
+    if (operation != "status" && operation != "tokens" && operation != "key" && operation != "manifest") throw std::runtime_error("unknown native API operation");
+    if (operation == "manifest") (void)subscriptionSongID(adam);
     if (operation == "key" && (adam.empty() || adam.size() > 19 || !std::all_of(adam.begin(), adam.end(), [](char c) { return c >= '0' && c <= '9'; }))) throw std::runtime_error("invalid adamId");
     if (operation == "key" && (uri.rfind("skd://", 0) != 0 || uri.size() > 8192 || (adam != "0" && uri == "skd://itunes.apple.com/P000000000/s1/e1"))) throw std::runtime_error("invalid key URI");
     if (operation == "tokens" && isatty(STDOUT_FILENO)) throw std::runtime_error("token exchange is an internal pipe operation");
     setGuestLogging(false);
     auto services = initializeServices(loader, directory, profileIdentity(directory));
     bool account = accountPresent(loader, services);
-    if (operation == "status") return "{\"regions\":[" + (account ? jsonString(storefront(loader, services)) : "") + "],\"account_present\":" + (account ? "true" : "false") + ",\"backend\":\"macos-arm64\",\"temari_compatible\":false,\"native_sample_decryption\":true}";
+    if (operation == "status") return "{\"regions\":[" + (account ? jsonString(storefront(loader, services)) : "") + "],\"account_present\":" + (account ? "true" : "false") + ",\"backend\":\"macos-arm64\",\"native_sample_decryption\":true}";
     if (!account) throw std::runtime_error("no saved account; sign in first");
+    if (operation == "manifest") {
+        DeviceManifestSession manifest;
+        return deviceManifest(loader, services, adam, manifest);
+    }
     if (operation == "tokens") return tokens(loader, services);
     GuestString identifier(adam.c_str()), key_uri(uri.c_str()), format("com.apple.streamingkeydelivery"), version("1"), server("https://play.itunes.apple.com/WebObjects/MZPlay.woa/music/fps"), protocol("simplified"), certificate(fairplayCertificate);
     const void* arguments[] = {services.foothill, &identifier, &identifier, &key_uri, &format, &version, &server, &protocol, &certificate};
@@ -176,7 +318,7 @@ std::string nativeApi(Loader& loader, const std::string& directory, const std::s
     callGuestReturn9(loader.symbol(music, "_ZN21SVFootHillSessionCtrl16getPersistentKeyERKNSt6__ndk112basic_stringIcNS0_11char_traitsIcEENS0_9allocatorIcEEEES8_S8_S8_S8_S8_S8_S8_"), &key, arguments);
     auto content = text(key.object);
     if (content.empty()) throw std::runtime_error("native FairPlay key retrieval returned empty");
-    return "{\"adamId\":" + jsonString(adam) + ",\"keyUri\":" + jsonString(uri) + ",\"contentKey\":" + jsonString(content) + ",\"temariCompatible\":false}";
+    return "{\"adamId\":" + jsonString(adam) + ",\"keyUri\":" + jsonString(uri) + ",\"contentKey\":" + jsonString(content) + "}";
 }
 
 namespace {
@@ -272,6 +414,7 @@ void nativeDecryptionWorker(Loader& loader, const std::string& directory, bool e
     auto services = initializeServices(loader, directory, profileIdentity(directory));
     if (!embedded && !accountPresent(loader, services)) throw std::runtime_error("no saved account");
     std::vector<std::unique_ptr<NativeContext>> contexts;
+    DeviceManifestSession manifest;
     writeFrame(true, Bytes{'N', 'A', 'D', '2'});
     Bytes request;
     while (readFrame(request)) {
@@ -303,7 +446,7 @@ void nativeDecryptionWorker(Loader& loader, const std::string& directory, bool e
                 appendWord(response, count);
                 auto decrypt = fn<int (*)(void*, uint32_t, void*, void*, uint32_t)>(loader, music, "NfcRKVnxuKZy04KWbdFu71Ou");
                 for (auto& sample : samples) {
-                    // Temari's contract: independent samples, aligned prefix, unchanged tail.
+                    // Each sample has an independent aligned encrypted prefix and a clear tail.
                     auto aligned = static_cast<uint32_t>(sample.size() / 16 * 16);
                     if (aligned && decrypt(contexts[handle - 1]->kd, 5, sample.data(), sample.data(), aligned) != 0)
                         throw std::runtime_error("native sample decryption failed");
@@ -324,6 +467,13 @@ void nativeDecryptionWorker(Loader& loader, const std::string& directory, bool e
                 input.end();
                 if (!accountPresent(loader, services)) throw std::runtime_error("no saved account");
                 auto json = tokens(loader, services);
+                response.assign(json.begin(), json.end());
+            } else if (embedded && operation == 6) {
+                auto adam = input.string(19);
+                input.end();
+                (void)subscriptionSongID(adam);
+                if (!accountPresent(loader, services)) throw std::runtime_error("no saved account");
+                auto json = deviceManifest(loader, services, adam, manifest);
                 response.assign(json.begin(), json.end());
             } else throw std::runtime_error("unknown native sample operation");
             writeFrame(true, response);

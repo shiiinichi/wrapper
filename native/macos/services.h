@@ -9,6 +9,8 @@ struct Services {
     void* lease = nullptr;
     void* foothill = nullptr;
 };
-Services initializeServices(Loader& loader, const std::string& data_directory, const std::string& identity = "a1368dcb4907e25f");
+Services initializeServices(Loader& loader, const std::string& data_directory, const std::string& identity = "a1368dcb4907e25f",
+                            bool useSignInDatabase = false);
+void selectAuthenticatedDatabase(const std::string& directory);
 std::string probeServices(Loader& loader, const std::string& data_directory);
 }

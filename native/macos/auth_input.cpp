@@ -21,6 +21,7 @@ void eraseSecretBytes(void* data, size_t size) { volatile unsigned char* bytes =
 void eraseSecret(std::string& text) { eraseSecretBytes(text.data(), text.size()); text.clear(); }
 LoginInput::~LoginInput() { eraseSecret(user); eraseSecret(password); }
 namespace {
+bool systemPrompt(const char* kind, const std::string& payload, std::string& answer);
 bool prompt(const std::string& script, const char* kind, std::string& answer, const std::string& payload = "") {
     if (script == "@private-pipe") {
         // Embedded clients render their own sign-in UI. Credentials and codes
@@ -51,41 +52,50 @@ bool prompt(const std::string& script, const char* kind, std::string& answer, co
         if (!transfer(STDIN_FILENO, answer.data(), answer.size(), false)) { eraseSecret(answer); return false; }
         return true;
     }
-    answer.reserve(8192);
-    int pipefd[2]; if (pipe(pipefd)) throw std::runtime_error("cannot open native prompt pipe");
-    int inputfd[2]; if (pipe(inputfd)) { close(pipefd[0]); close(pipefd[1]); throw std::runtime_error("cannot open native prompt input"); }
-    fcntl(inputfd[1], F_SETNOSIGPIPE, 1);
-    fcntl(pipefd[0], F_SETFD, FD_CLOEXEC); fcntl(pipefd[1], F_SETFD, FD_CLOEXEC);
-    fcntl(inputfd[0], F_SETFD, FD_CLOEXEC); fcntl(inputfd[1], F_SETFD, FD_CLOEXEC);
-    posix_spawn_file_actions_t actions; posix_spawn_file_actions_init(&actions);
-    posix_spawn_file_actions_adddup2(&actions, pipefd[1], STDOUT_FILENO);
-    posix_spawn_file_actions_adddup2(&actions, inputfd[0], STDIN_FILENO);
-    posix_spawn_file_actions_addopen(&actions, STDERR_FILENO, "/dev/null", O_WRONLY, 0);
-    posix_spawn_file_actions_addclose(&actions, pipefd[0]);
-    posix_spawn_file_actions_addclose(&actions, pipefd[1]);
-    posix_spawn_file_actions_addclose(&actions, inputfd[0]);
-    posix_spawn_file_actions_addclose(&actions, inputfd[1]);
-    char executable[] = "/usr/bin/osascript";
-    char* arguments[] = {executable, const_cast<char*>(script.c_str()), const_cast<char*>(kind), nullptr};
-    pid_t child = 0; int error = posix_spawn(&child, executable, &actions, nullptr, arguments, environ);
-    posix_spawn_file_actions_destroy(&actions); close(pipefd[1]);
-    close(inputfd[0]);
-    if (error) { close(pipefd[0]); close(inputfd[1]); throw std::runtime_error("cannot launch native sign-in prompt"); }
-    size_t sent = 0;
-    while (sent < payload.size()) { ssize_t n = write(inputfd[1], payload.data() + sent, payload.size() - sent); if (n < 0 && errno == EINTR) continue; if (n <= 0) break; sent += n; }
-    close(inputfd[1]);
-    std::array<char, 1024> buffer{};
-    for (;;) {
-        ssize_t count = read(pipefd[0], buffer.data(), buffer.size());
-        if (count < 0 && errno == EINTR) continue;
-        if (count <= 0) break;
-        if (answer.size() + count > 8192) { kill(child, SIGTERM); close(pipefd[0]); waitpid(child, nullptr, 0); eraseSecret(answer); throw std::runtime_error("native sign-in input is too long"); }
-        answer.append(buffer.data(), count); eraseSecretBytes(buffer.data(), buffer.size());
+    if (script != "@system-dialog") throw std::runtime_error("unknown native sign-in prompt mechanism");
+    return systemPrompt(kind, payload, answer);
+}
+
+std::string promptText(CFStringRef s) {
+    if(!s)return {};
+    CFIndex size=CFStringGetMaximumSizeForEncoding(CFStringGetLength(s),kCFStringEncodingUTF8)+1;
+    if(size<=0 || size>32768) return {};
+    std::vector<char> bytes(static_cast<size_t>(size));
+    if(!CFStringGetCString(s,bytes.data(),size,kCFStringEncodingUTF8)) return {};
+    std::string result(bytes.data());eraseSecretBytes(bytes.data(),bytes.size());return result;
+}
+bool systemPrompt(const char* kind,const std::string& payload,std::string& answer) {
+    auto dictionary=CFDictionaryCreateMutable(nullptr,0,&kCFTypeDictionaryKeyCallBacks,&kCFTypeDictionaryValueCallBacks);
+    struct Release {CFTypeRef ref;~Release(){if(ref)CFRelease(ref);}} release{dictionary};
+    CFDictionarySetValue(dictionary,kCFUserNotificationAlertHeaderKey,CFSTR("Apple Account Sign In"));
+    CFDictionarySetValue(dictionary,kCFUserNotificationDefaultButtonTitleKey,CFSTR("Continue"));
+    CFDictionarySetValue(dictionary,kCFUserNotificationAlternateButtonTitleKey,CFSTR("Cancel"));
+    CFOptionFlags options=kCFUserNotificationPlainAlertLevel;
+    const bool login=std::strcmp(kind,"credentials")==0, dialog=std::strcmp(kind,"dialog")==0;
+    if(dialog) {
+        CFDataRef data=CFDataCreate(nullptr,reinterpret_cast<const UInt8*>(payload.data()),payload.size());
+        Release releaseData{data};auto value=CFPropertyListCreateWithData(nullptr,data,kCFPropertyListImmutable,nullptr,nullptr);
+        Release releaseValue{value};if(!value || CFGetTypeID(value)!=CFDictionaryGetTypeID())return false;
+        auto content=static_cast<CFDictionaryRef>(value);
+        for(auto pair:{std::pair{CFSTR("title"),kCFUserNotificationAlertHeaderKey},std::pair{CFSTR("message"),kCFUserNotificationAlertMessageKey},std::pair{CFSTR("buttons"),kCFUserNotificationPopUpTitlesKey}}){
+            if(auto item=CFDictionaryGetValue(content,pair.first))CFDictionarySetValue(dictionary,pair.second,item);
+        }
+    } else {
+        const void* titles[]={login?CFSTR("Apple Account"):CFSTR("Verification Code"),CFSTR("Password")};
+        auto fields=CFArrayCreate(nullptr,titles,login?2:1,&kCFTypeArrayCallBacks);
+        CFDictionarySetValue(dictionary,kCFUserNotificationTextFieldTitlesKey,fields);CFRelease(fields);
+        if(login)options|=CFUserNotificationSecureTextField(1);
     }
-    close(pipefd[0]); int status = 0; while (waitpid(child, &status, 0) < 0 && errno == EINTR) {}
-    if (!WIFEXITED(status) || WEXITSTATUS(status) != 0) { eraseSecret(answer); return false; }
-    if (!answer.empty() && answer.back() == '\n') answer.pop_back();
-    return true;
+    SInt32 error=0;auto prompt=CFUserNotificationCreate(nullptr,600,options,&error,dictionary);
+    Release releasePrompt{prompt};if(!prompt||error)return false;
+    CFOptionFlags response=0;
+    if(CFUserNotificationReceiveResponse(prompt,600,&response) || (response&3)!=kCFUserNotificationDefaultResponse) return false;
+    if(dialog)answer=std::to_string(((response>>24)&0xff)+1);
+    else {
+        answer=promptText(CFUserNotificationGetResponseValue(prompt,kCFUserNotificationTextFieldValuesKey,0));
+        if(login){auto password=promptText(CFUserNotificationGetResponseValue(prompt,kCFUserNotificationTextFieldValuesKey,1));answer+="\n"+password;eraseSecret(password);}
+    }
+    return !answer.empty();
 }
 bool hexIdentity(const std::string& text) { return text.size() == 16 && std::all_of(text.begin(), text.end(), [](char c) { return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f'); }); }
 }

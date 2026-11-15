@@ -1,82 +1,43 @@
-#!/usr/bin/env bash
+#!/bin/bash
 set -euo pipefail
-
-ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-BUILD_DIR="$ROOT_DIR/build/native-poc"
-PROFILE_DIR="${WRAPPER_PROFILE_DIR:-$HOME/Library/Application Support/Native Music Wrapper}"
-MODE="${1:-run}"
-APP_BINARY="$BUILD_DIR/wrapper-native-poc"
-
-if [[ "$(uname -s)" != Darwin || "$(uname -m)" != arm64 ]]; then
-  echo "This proof of concept requires native arm64 macOS and Xcode command-line tools." >&2
-  exit 2
-fi
-case "$MODE" in
-  run|--app|app|--app-build|--probes|--build|--serve|serve|--verify|verify|--debug|debug|--logs|logs|--telemetry|telemetry|--login|login) ;;
-  *) echo "usage: $0 [run|--app-build|--probes|--build|--serve|--verify|--debug|--logs|--telemetry|--login]" >&2; exit 2 ;;
+root="$(cd "$(dirname "$0")/.." && pwd)"
+native="$root/native/macos"
+build="$root/build/native-poc"
+profile="${WRAPPER_PROFILE_DIR:-$HOME/Library/Application Support/Native Music Wrapper}"
+mode="${1:-run}"
+[[ $# == 0 ]] || shift
+[[ "$(uname -s)" == Darwin && "$(uname -m)" == arm64 ]] || { echo "Apple Silicon macOS and Xcode command-line tools are required." >&2; exit 2; }
+case "$mode" in
+  --build|--probes|--debug|debug|--login|login) target=runtime ;;
+  run|app|--app|--app-build|--serve|serve|--verify|verify|--logs|logs|--telemetry|telemetry|--check-endpoints) target=all ;;
+  *) echo "Usage: $0 [run|--app-build|--build|--serve|--login|--verify|--probes|--debug|--logs|--check-endpoints]" >&2; exit 2 ;;
 esac
-
-# Stop this project's desktop app before replacing its bundle or signing in.
-# The desktop-owned server watches its parent and exits when the app stops.
-case "$MODE" in
-  run|--app|app|--app-build|--serve|serve|--login|login|--debug|debug)
-    pkill -x NativeMusicWrapper >/dev/null 2>&1 || true
-    pkill -x wrapper-native-poc >/dev/null 2>&1 || true
-    ;;
-esac
-mkdir -p "$BUILD_DIR"
-python3 "$ROOT_DIR/native/macos/prepare_assets.py" --destination "$BUILD_DIR/assets"
-xcrun clang++ -arch arm64 -std=c++17 -O1 -g -Wall -Wextra -Werror \
-  "$ROOT_DIR/native/macos/main.cpp" \
-  "$ROOT_DIR/native/macos/elf_loader.cpp" \
-  "$ROOT_DIR/native/macos/shims.cpp" \
-  "$ROOT_DIR/native/macos/jni_host.cpp" \
-  "$ROOT_DIR/native/macos/abi_runtime.cpp" \
-  "$ROOT_DIR/native/macos/abi_selftest.cpp" \
-  "$ROOT_DIR/native/macos/services.cpp" \
-  "$ROOT_DIR/native/macos/authentication.cpp" \
-  "$ROOT_DIR/native/macos/auth_input.cpp" \
-  "$ROOT_DIR/native/macos/native_api.cpp" \
-  "$ROOT_DIR/native/macos/format_bridge.cpp" \
-  "$ROOT_DIR/native/macos/posix_bridge.cpp" \
-  "$ROOT_DIR/native/macos/network_bridge.cpp" \
-  "$ROOT_DIR/native/macos/sqlite_bridge.cpp" \
-  "$ROOT_DIR/native/macos/security_selftest.cpp" \
-  "$ROOT_DIR/native/macos/guest_call.S" \
-  -lcurl -lsqlite3 -framework CoreFoundation -o "$APP_BINARY"
-
-case "$MODE" in
-  --build) exit 0 ;;
+make -C "$native" -j 5 "$target"
+"$build/native-asset-tool" "$native/assets" "$build/assets"
+worker="$build/wrapper-native-poc"
+case "$mode" in
+  --build) ;;
   run|--app|app|--app-build)
-    APP_BUNDLE="$BUILD_DIR/Native Music Wrapper.app"
-    python3 "$ROOT_DIR/native/macos/package_desktop.py" --destination "$APP_BUNDLE" --binary "$APP_BINARY" --assets "$BUILD_DIR/assets"
-    DESKTOP_SOURCES=("$ROOT_DIR"/native/macos/Desktop/{App,Views,Models,Services,ViewModels}/*.swift)
-    xcrun swiftc -swift-version 5 -target arm64-apple-macos15.0 -module-cache-path "$BUILD_DIR/swift-module-cache" -O -parse-as-library \
-      "${DESKTOP_SOURCES[@]}" -o "$APP_BUNDLE/Contents/MacOS/NativeMusicWrapper"
-    /usr/bin/codesign --force --sign - "$APP_BUNDLE"
-    if [[ "$MODE" != --app-build ]]; then
-      /usr/bin/open -n "$APP_BUNDLE" --args --profile "$PROFILE_DIR"
-    fi
-    exit 0
-    ;;
-  --serve|serve)
-    shift
-    exec python3 "$ROOT_DIR/native/macos/http_server.py" --binary "$APP_BINARY" --assets "$BUILD_DIR/assets" --data-dir "$PROFILE_DIR" "$@"
-    ;;
-  --login|login)
-    exec python3 "$ROOT_DIR/native/macos/sign_in.py" --binary "$APP_BINARY" --assets "$BUILD_DIR/assets" --data-dir "$PROFILE_DIR"
-    ;;
-  --debug|debug)
-    exec xcrun lldb -- "$APP_BINARY" --assets "$BUILD_DIR/assets" --apple-profile --initialize libandroidappmusic.so
-    ;;
-  --verify|verify)
-    python3 "$ROOT_DIR/native/macos/test_loader.py" --binary "$APP_BINARY" --assets "$BUILD_DIR/assets"
-    python3 "$ROOT_DIR/native/macos/test_http_server.py"
-    python3 "$ROOT_DIR/native/macos/test_native_decryption.py"
-    python3 "$ROOT_DIR/native/macos/test_assets.py"
-    python3 "$ROOT_DIR/native/macos/test_security.py"
-    ;;
+    stage="$(mktemp -d "$build/.desktop.XXXXXXXX")"
+    trap 'rm -rf "$stage"' EXIT
+    app="$stage/Native Music Wrapper.app"
+    mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources/Runtime"
+    cp "$native/standalone/Info.plist" "$app/Contents/Info.plist"
+    mkdir -p "$app/Contents/Resources/Notices"
+    cp "$native/third_party/json/LICENSE.MIT" "$app/Contents/Resources/Notices/nlohmann-json.txt"
+    cp "$native/third_party/http/LICENSE" "$app/Contents/Resources/Notices/cpp-httplib.txt"
+    cp "$worker" "$build/native-music-wrapper-server" "$build/NativeMusicWrapper" "$app/Contents/MacOS/"
+    "$build/native-asset-tool" "$native/assets" "$app/Contents/Resources/Runtime/assets"
+    /usr/bin/codesign --force --sign - "$app"
+    /usr/bin/codesign --verify --strict "$app"
+    dst="$build/Native Music Wrapper.app"
+    if [[ -d "$dst" ]]; then mv "$dst" "$stage/previous.app"; fi
+    if ! mv "$app" "$dst"; then [[ ! -d "$stage/previous.app" ]] || mv "$stage/previous.app" "$dst"; exit 1; fi
+    if [[ "$mode" != --app-build ]]; then /usr/bin/open "$dst" --args --profile "$profile" "$@"; fi ;;
+  --serve|serve) exec "$build/native-music-wrapper-server" --binary "$worker" --assets "$build/assets" --data-dir "$profile" "$@" ;;
+  --login|login) exec "$worker" --assets "$build/assets" --apple-profile --probe auth-login --data-dir "$profile" --prompt-script @system-dialog ;;
+  --debug|debug) exec xcrun lldb -- "$worker" --assets "$build/assets" --apple-profile --initialize libandroidappmusic.so ;;
+  --logs|logs|--telemetry|telemetry) exec tail -f "$profile/http-timings.jsonl" ;;
+  --verify|verify|--probes) make -C "$native" -j 4 verify ;;
+  --check-endpoints) exec "$build/native-endpoint-check" "$@" ;;
 esac
-# Logs and telemetry are the bounded probe's JSON report and stderr. There is
-# no background daemon to leave running or a GUI window to verify.
-exec python3 "$ROOT_DIR/native/macos/run.py" --binary "$APP_BINARY" --assets "$BUILD_DIR/assets"

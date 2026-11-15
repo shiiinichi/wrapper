@@ -1,4 +1,5 @@
 #include "services.h"
+#include "music_client.h"
 #include "elf_loader.h"
 #include "jni_host.h"
 #include "posix_bridge.h"
@@ -8,7 +9,9 @@
 #include <cstdlib>
 #include <cstring>
 #include <filesystem>
+#include <fcntl.h>
 #include <stdexcept>
+#include <unistd.h>
 
 namespace native_poc {
 namespace {
@@ -55,10 +58,27 @@ std::string stringValue(const void* object) {
 }
 } // namespace
 
-Services initializeServices(Loader& loader, const std::string& data_directory, const std::string& device_identity) {
+void selectAuthenticatedDatabase(const std::string& directory) {
+    // Presence is the complete marker. Creating it atomically commits a successful
+    // login. An interrupted login leaves the previous flat account selected.
+    auto path = std::filesystem::path(directory) / "music-client-v1";
+    if (std::filesystem::is_regular_file(std::filesystem::symlink_status(path))) return;
+    int fd = open(path.c_str(), O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW | O_WRONLY, 0600);
+    require(fd >= 0, "could not select the authenticated Music client");
+    close(fd);
+}
+
+Services initializeServices(Loader& loader, const std::string& data_directory, const std::string& device_identity,
+                            bool useSignInDatabase) {
     require(!data_directory.empty(), "service bootstrap requires --data-dir");
     std::filesystem::create_directories(data_directory);
     auto base = std::filesystem::canonical(data_directory).string();
+    // This marker selects the database location only. Both layouts always
+    // configure the very same wrapper-lite Android client.
+    const auto profile = std::filesystem::path(base);
+    const bool nestedDatabase = useSignInDatabase ||
+        std::filesystem::is_regular_file(std::filesystem::symlink_status(profile / "music-client-v1")) ||
+        !std::filesystem::is_regular_file(std::filesystem::symlink_status(profile / "accounts.sqlitedb"));
     std::filesystem::permissions(base, std::filesystem::perms::owner_all, std::filesystem::perm_options::replace);
     setRuntimeDirectory(base);
     loader.load(music);
@@ -86,6 +106,12 @@ Services initializeServices(Loader& loader, const std::string& data_directory, c
 
     stage("request-context-create");
     auto database = base + "/mpl_db"; String path(database.c_str());
+    if (nestedDatabase) {
+        const auto state = std::filesystem::symlink_status(database);
+        if (!std::filesystem::exists(state)) std::filesystem::create_directory(database);
+        require(std::filesystem::is_directory(std::filesystem::symlink_status(database)), "invalid music account directory");
+        std::filesystem::permissions(database, std::filesystem::perms::owner_all, std::filesystem::perm_options::replace);
+    }
     Shared context;
     callGuestReturn(entry(loader, music,
         "_ZNSt6__ndk110shared_ptrIN17storeservicescore14RequestContextEE11make_sharedIJRNS_12basic_stringIcNS_11char_traitsIcEENS_9allocatorIcEEEEEEES3_DpOT_"), &context, &path);
@@ -102,11 +128,12 @@ Services initializeServices(Loader& loader, const std::string& data_directory, c
     *reinterpret_cast<void**>(allocation) = table + 16;
     Shared config{allocation + 32, allocation};
     fn<void (*)(void*)>(loader, music, "_ZN17storeservicescore20RequestContextConfigC2Ev")(config.object);
-    setString(loader, "_ZN17storeservicescore20RequestContextConfig20setBaseDirectoryPathERKNSt6__ndk112basic_stringIcNS1_11char_traitsIcEENS1_9allocatorIcEEEE", config.object, base.c_str());
+    setString(loader, "_ZN17storeservicescore20RequestContextConfig20setBaseDirectoryPathERKNSt6__ndk112basic_stringIcNS1_11char_traitsIcEENS1_9allocatorIcEEEE", config.object, nestedDatabase ? database.c_str() : base.c_str());
     const char* setters[] = {
         "19setClientIdentifier", "20setVersionIdentifier", "21setPlatformIdentifier", "17setProductVersion",
         "14setDeviceModel", "15setBuildVersion", "19setLocaleIdentifier", "21setLanguageIdentifier"};
-    const char* values[] = {"com.apple.android.music", "4.9.3", "Android", "10", "NativeMacPoC", "native-poc", "en_US", "en"};
+    const char* values[] = {music_client::name, music_client::version, music_client::platform, music_client::platformVersion,
+                            music_client::model, music_client::build, music_client::locale, music_client::locale};
     for (size_t i = 0; i < 8; ++i) {
         std::string symbol = std::string("_ZN17storeservicescore20RequestContextConfig") + setters[i] +
             "ERKNSt6__ndk112basic_stringIcNS1_11char_traitsIcEENS1_9allocatorIcEEEE";
@@ -163,5 +190,14 @@ Services initializeServices(Loader& loader, const std::string& data_directory, c
         "\"automatic_lease_refresh\":false,\"lease_requested\":false,\"authenticated\":false,\"process_owned_lifetime\":true}";
     return {context, presentation, evidence, lease.data(), foothill};
 }
-std::string probeServices(Loader& loader, const std::string& directory) { return initializeServices(loader, directory).evidence; }
+std::string probeServices(Loader& loader, const std::string& directory) {
+    auto services = initializeServices(loader, directory);
+    alignas(8) std::array<unsigned char, 24> agent{};
+    callGuestReturn(entry(loader, store, "_ZNK17storeservicescore14RequestContext9userAgentEv"), agent.data(), services.context.object);
+    auto name = stringValue(agent.data());
+    fn<void (*)(void*)>(loader, "libc++_shared.so",
+        "_ZNSt6__ndk112basic_stringIcNS_11char_traitsIcEENS_9allocatorIcEEED2Ev")(agent.data());
+    services.evidence.pop_back();
+    return services.evidence + ",\"user_agent\":" + jsonString(name) + "}";
+}
 } // namespace native_poc

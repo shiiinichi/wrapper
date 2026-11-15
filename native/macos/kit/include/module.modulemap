@@ -1,0 +1,6 @@
+framework module NativeMusicWrapperKit {
+    umbrella header "NativeMusicWrapperKit.h"
+    export *
+    link "c++"
+    link "curl"
+}

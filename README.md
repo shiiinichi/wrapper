@@ -6,8 +6,8 @@ executes the Android ARM64 libraries directly in a macOS process.
 ## Requirements
 
 - Apple Silicon Mac running macOS 15 or later.
-- Xcode command-line tools, including Swift and Clang.
-- Python 3. The 12 required ARM64 libraries are included in `native/macos/assets/`.
+- Xcode command-line tools, including Clang and Make.
+- The 12 required ARM64 libraries are included in `native/macos/assets/`.
 - Current macOS security updates. zlib, XML and ICU use system libraries instead
   of the obsolete Android copies.
 
@@ -44,7 +44,7 @@ Use one server per port. Account data stays outside the app bundle and Git.
 
 ```sh
 ./script/build_and_run.sh --verify
-python3 native/macos/check_endpoints.py --adam-id 1552791761
+./script/build_and_run.sh --check-endpoints --adam-id 1552791761
 ```
 
 The live endpoint checker requires a running native server and a signed-in
@@ -82,14 +82,14 @@ a logo. An artist without one still returns their metadata, with `artistLogo: nu
 
 The native key response supplies a versioned, opaque sample-decryption handle.
 Compatible clients send sample batches to `/decrypt`; a persistent ARM64 worker
-decrypts them without x86 snapshots. Legacy Temari templates remain unsupported.
+decrypts them without x86 snapshots.
 Actual DRM license issuance needs a player/CDM-generated challenge.
 
 See the [native implementation guide](native/macos/README.md) for authentication,
 token lifecycle, compatibility boundaries, and detailed validation evidence.
 
 For embedding in a macOS app, build [NativeMusicWrapperKit](native/macos/BinaryPackage/README.md),
-a binary Swift package with a precompiled, privately spawned worker and its pinned assets.
+a C++ static XCFramework with a C-compatible header, a private native worker and its pinned assets. SwiftPM distributes the binary package.
 
 ## Optional CMake entrypoint
 

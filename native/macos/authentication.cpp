@@ -157,7 +157,7 @@ AuthenticationResult authenticate(Loader& loader, const std::string& directory, 
     if (!preflight && script.empty()) throw std::runtime_error("authentication requires a native prompt script");
     setGuestLogging(false);
     auto identity = profileIdentity(directory);
-    auto services = initializeServices(loader, directory, identity);
+    auto services = initializeServices(loader, directory, identity, !preflight);
     active_loader = &loader; presentation = services.presentation;
     LoginInput input; login_input = &input; preflight_mode = preflight; prompt_script = script;
     if (!preflight) requestPublicBag(loader, services.context);
@@ -190,6 +190,10 @@ AuthenticationResult authenticate(Loader& loader, const std::string& directory, 
     if (error && error->object) {
         auto* code = fn<const int* (*)(void*)>(store, "_ZNK17storeservicescore19StoreErrorCondition9errorCodeEv")(error->object); if (code) error_code = *code;
         auto* external = fn<const int64_t* (*)(void*)>(store, "_ZNK17storeservicescore19StoreErrorCondition17externalErrorCodeEv")(error->object); if (external) external_error = *external;
+    }
+    if (!preflight && account_present) {
+        if (error_code || external_error) throw std::runtime_error("Music client authentication was not completed");
+        selectAuthenticatedDatabase(directory);
     }
     auto network = networkState();
     login_input = nullptr;

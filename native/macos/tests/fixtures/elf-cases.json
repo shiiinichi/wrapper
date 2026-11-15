@@ -1,0 +1,271 @@
+[
+  {
+    "case": "wrong architecture",
+    "mode": "--inspect",
+    "apple": false,
+    "patches": [
+      {
+        "offset": 18,
+        "from": "b7",
+        "to": "3e"
+      }
+    ],
+    "expect": {
+      "exit": 1,
+      "error": "AArch64"
+    }
+  },
+  {
+    "case": "truncated header",
+    "mode": "--inspect",
+    "apple": false,
+    "patches": [],
+    "expect": {
+      "exit": 1,
+      "error": "size"
+    },
+    "size": 32
+  },
+  {
+    "case": "program headers outside the ELF",
+    "mode": "--inspect",
+    "apple": false,
+    "patches": [
+      {
+        "offset": 32,
+        "from": "4000",
+        "to": "b92a"
+      }
+    ],
+    "expect": {
+      "exit": 1,
+      "error": "program-header"
+    }
+  },
+  {
+    "case": "excessive load alignment",
+    "mode": "--inspect",
+    "apple": false,
+    "patches": [
+      {
+        "offset": 114,
+        "from": "01",
+        "to": "00"
+      },
+      {
+        "offset": 117,
+        "from": "00",
+        "to": "01"
+      }
+    ],
+    "expect": {
+      "exit": 1,
+      "error": "alignment exceeds limit"
+    }
+  },
+  {
+    "case": "huge address span",
+    "mode": "--inspect",
+    "apple": false,
+    "patches": [
+      {
+        "offset": 104,
+        "from": "8821",
+        "to": "0000"
+      },
+      {
+        "offset": 109,
+        "from": "00",
+        "to": "01"
+      }
+    ],
+    "expect": {
+      "exit": 1,
+      "error": "256 MiB"
+    }
+  },
+  {
+    "case": "writable executable segment",
+    "mode": "--inspect",
+    "apple": false,
+    "patches": [
+      {
+        "offset": 68,
+        "from": "05",
+        "to": "07"
+      }
+    ],
+    "expect": {
+      "exit": 1,
+      "error": "writable executable"
+    }
+  },
+  {
+    "case": "invalid string table",
+    "mode": "--inspect",
+    "apple": false,
+    "patches": [
+      {
+        "offset": 8704,
+        "from": "9805000000000000",
+        "to": "00f0ffffffffffff"
+      }
+    ],
+    "expect": {
+      "exit": 1,
+      "error": "outside PT_LOAD"
+    }
+  },
+  {
+    "case": "unsafe dependency path",
+    "mode": "--inspect",
+    "apple": false,
+    "patches": [
+      {
+        "offset": 1887,
+        "from": "6c6962646c2e736f",
+        "to": "2e2e2f782e736f00"
+      }
+    ],
+    "expect": {
+      "exit": 1,
+      "error": "unsafe DT_NEEDED"
+    }
+  },
+  {
+    "case": "relocation to a readonly segment",
+    "mode": "--inspect",
+    "apple": false,
+    "patches": [
+      {
+        "offset": 2096,
+        "from": "882101",
+        "to": "000100"
+      }
+    ],
+    "expect": {
+      "blocked": true,
+      "issue": "not in a writable"
+    }
+  },
+  {
+    "case": "unknown relocation",
+    "mode": "--inspect",
+    "apple": false,
+    "patches": [
+      {
+        "offset": 2104,
+        "from": "0304",
+        "to": "0f27"
+      }
+    ],
+    "expect": {
+      "blocked": true,
+      "issue": "9999"
+    }
+  },
+  {
+    "case": "unresolved strong symbol",
+    "mode": "--inspect",
+    "apple": false,
+    "patches": [
+      {
+        "offset": 1872,
+        "from": "6d616c6c6f63",
+        "to": "6e6f686f7374"
+      }
+    ],
+    "expect": {
+      "missing": "nohost",
+      "blocked": true
+    }
+  },
+  {
+    "case": "unresolved weak symbol",
+    "mode": "--inspect",
+    "apple": false,
+    "patches": [
+      {
+        "offset": 1244,
+        "from": "12",
+        "to": "22"
+      },
+      {
+        "offset": 1872,
+        "from": "6d616c6c6f63",
+        "to": "6e6f686f7374"
+      }
+    ],
+    "expect": {
+      "weak": true
+    }
+  },
+  {
+    "case": "function bridge rejected for data",
+    "mode": "--inspect",
+    "apple": false,
+    "patches": [
+      {
+        "offset": 1244,
+        "from": "12",
+        "to": "11"
+      }
+    ],
+    "expect": {
+      "missing": "malloc"
+    }
+  },
+  {
+    "case": "unimplemented function terminates child",
+    "mode": "--probe",
+    "apple": true,
+    "patches": [
+      {
+        "offset": 1872,
+        "from": "6d616c6c6f63",
+        "to": "6e6f686f7374"
+      }
+    ],
+    "expect": {
+      "exit": 86,
+      "stderr": "unimplemented Android function: nohost"
+    }
+  },
+  {
+    "case": "unsupported long double terminates child",
+    "mode": "--probe",
+    "apple": true,
+    "patches": [
+      {
+        "offset": 1240,
+        "from": "b8",
+        "to": "a9"
+      },
+      {
+        "offset": 1857,
+        "from": "5f5f61737365727432",
+        "to": "737472746f6c640000"
+      }
+    ],
+    "expect": {
+      "exit": 86,
+      "stderr": "unimplemented Android function: strtold"
+    }
+  },
+  {
+    "case": "guarded ABI terminates child",
+    "mode": "--probe",
+    "apple": false,
+    "patches": [
+      {
+        "offset": 1240,
+        "from": "b8",
+        "to": "a9"
+      }
+    ],
+    "expect": {
+      "exit": 86,
+      "stderr": "guarded Android ABI call: __assert2"
+    }
+  }
+]
