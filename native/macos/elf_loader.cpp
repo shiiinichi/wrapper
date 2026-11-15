@@ -1,4 +1,5 @@
 #include "elf_loader.h"
+#include "third_party/json/json.hpp"
 #include "shims.h"
 #include "abi_runtime.h"
 #include "sqlite_bridge.h"
@@ -723,22 +724,7 @@ void* Loader::symbol(const std::string& library, const std::string& name) const 
 }
 
 std::string jsonString(const std::string& value) {
-    std::ostringstream out;
-    out << '"';
-    for (unsigned char c : value) {
-        switch (c) {
-            case '"': out << "\\\""; break;
-            case '\\': out << "\\\\"; break;
-            case '\n': out << "\\n"; break;
-            case '\r': out << "\\r"; break;
-            case '\t': out << "\\t"; break;
-            default:
-                if (c < 32 || c >= 127) out << "\\u00" << std::hex << std::setw(2) << std::setfill('0') << unsigned(c);
-                else out << char(c);
-        }
-    }
-    out << '"';
-    return out.str();
+    return nlohmann::json(value).dump(-1, ' ', false, nlohmann::json::error_handler_t::replace);
 }
 
 std::string loaderReport(const Loader& loader) {

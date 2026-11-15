@@ -151,6 +151,32 @@ void loaderTests(Report &r, const fs::path &worker, const fs::path &assets, cons
         Temp t;
         allTrue(invoke(worker, assets, "--probe", "auth-account-abi", t.path)["result"]);
     });
+    r.run("worker account status preserves Unicode and JSON escaping", [&] {
+        Temp t;
+        wrapper::Worker child(worker.string(), assets.string(), t.path.string());
+        NMWOperation operation;
+        Bytes status;
+        wrapper::appendWord(status, 4);
+        (void)child.exchange(status, operation);
+        child.close();
+        sqlite3 *database = nullptr;
+        require(sqlite3_open((t.path / "mpl_db" / "accounts.sqlitedb").c_str(), &database) == SQLITE_OK,
+                "account fixture database");
+        struct Close { sqlite3 *db; ~Close() { sqlite3_close(db); } } close{database};
+        const char *sql = "INSERT INTO account(active,dsid,id,firstName,lastName,storeFront)"
+                          "VALUES(1,42,'fixture@example.invalid','Renée \"quoted\"','山田 🎵','143441-1,31')";
+        require(sqlite3_exec(database, sql, nullptr, nullptr, nullptr) == SQLITE_OK, "account fixture");
+        auto result = wrapper::json(child.exchange(status, operation));
+        require(result["account_present"] == true && result["account_name"] == "Renée \"quoted\" 山田 🎵",
+                "account name changed during JSON encoding");
+    });
+    r.run("invalid diagnostic UTF-8 still produces valid JSON", [&] {
+        Temp t;
+        Process process({worker.string(), "--" + std::string(1, char(0xff))}, t.path);
+        require(process.wait() == 1, "invalid option succeeded");
+        auto report = Json::parse(read(process.out));
+        require(report["error"] == "unknown or incomplete argument: --�", "invalid byte replacement");
+    });
     r.run("services require an explicit account directory", [&] {
         Temp t;
         Process p({worker.string(), "--assets", assets.string(), "--apple-profile", "--probe", "services"},
