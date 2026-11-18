@@ -151,6 +151,10 @@ void loaderTests(Report &r, const fs::path &worker, const fs::path &assets, cons
         Temp t;
         allTrue(invoke(worker, assets, "--probe", "auth-account-abi", t.path)["result"]);
     });
+    r.run("user profile getter, data, image and request ABI", [&] {
+        Temp t;
+        allTrue(invoke(worker, assets, "--probe", "auth-profile-abi", t.path)["result"]);
+    });
     r.run("worker account status preserves Unicode and JSON escaping", [&] {
         Temp t;
         wrapper::Worker child(worker.string(), assets.string(), t.path.string());

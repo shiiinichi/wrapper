@@ -22,7 +22,7 @@ inline void require(bool pass, const std::string &description) {
 struct Temp {
     fs::path path;
     Temp() {
-        std::string p = "/private/tmp/native-wrapper-test-XXXXXX";
+        std::string p = (fs::temp_directory_path() / "native-wrapper-test-XXXXXX").string();
         if (!mkdtemp(p.data()))
             throw std::runtime_error("temporary folder");
         path = p;

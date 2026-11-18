@@ -5,6 +5,7 @@
 #include "authentication.h"
 #include "auth_input.h"
 #include "native_api.h"
+#include "user_profile.h"
 #include "security_selftest.h"
 
 #if !defined(__APPLE__) || !defined(__aarch64__)
@@ -203,6 +204,7 @@ int main(int argc, char** argv) {
             }
             else if (library == "auth-abi" && apple_profile) result = native_poc::probeAuthenticationAbi(*loader, data_directory);
             else if (library == "auth-account-abi" && apple_profile) result = native_poc::probeAccountMetadataAbi(*loader, data_directory);
+            else if (library == "auth-profile-abi" && apple_profile) result = native_poc::probeUserProfileAbi(*loader, data_directory);
             else if (library == "auth-input-pipe" && apple_profile) result = native_poc::probeAuthInputPipe();
             else if (library == "auth-status" && apple_profile) result = native_poc::authenticationStatus(*loader, data_directory);
             else if (library == "network-abi" && apple_profile) result = native_poc::probeNetworkAbi(assets);

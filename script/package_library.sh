@@ -9,7 +9,7 @@ native="$root/native/macos"
 mkdir -p "$(dirname "$2")"
 dest="$(cd "$(dirname "$2")" && pwd)/$(basename "$2")"
 [[ ! -e "$dest" ]] || { echo "Output already exists." >&2; exit 2; }
-work="$(mktemp -d /private/tmp/native-wrapper-package.XXXXXXXX)"
+work="$(mktemp -d -t native-wrapper-package)"
 stage="$(mktemp -d "$(dirname "$dest")/.native-wrapper-package.XXXXXXXX")"
 trap 'rm -rf "$work" "$stage"' EXIT
 make -C "$native" -j 5 OUT="$work/build" runtime

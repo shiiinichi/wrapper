@@ -1,4 +1,6 @@
 #include "runtime.h"
+#include "../profile_metadata.h"
+#include "../worker_protocol.h"
 #include <algorithm>
 #include <charconv>
 #include <cstdlib>
@@ -122,6 +124,35 @@ std::string newToken() {
     }
     return s;
 }
+Json profileResult(const Bytes& raw) {
+    if (raw.size() > native_poc::maximumProfileReply) fail(NMW_OVERSIZED);
+    auto value = json(raw);
+    if (!value.is_object() || !value.contains("profile_present") || !value["profile_present"].is_boolean())
+        fail(NMW_INVALID);
+    Json result = {{"profile_present", value["profile_present"]}, {"name", nullptr},
+                   {"handle", nullptr}, {"image", nullptr}};
+    if (!value["profile_present"].get<bool>()) return result;
+    for (auto name : {"name", "handle"}) {
+        auto text = field(value, name);
+        if (native_poc::validProfileText(text, std::strcmp(name, "name") == 0 ?
+                native_poc::maximumProfileName : native_poc::maximumProfileHandle))
+            result[name] = text;
+    }
+    auto image = value.find("image");
+    if (image == value.end() || !image->is_object()) return result;
+    auto url = field(*image, "url");
+    if (!native_poc::validProfileImageURL(url)) return result;
+    Json safeImage = {{"url", url}};
+    for (auto key : {"width", "height"}) {
+        auto dimension = image->find(key);
+        if (dimension == image->end()) continue;
+        if (!dimension->is_number_integer() || *dimension <= 0 || *dimension > native_poc::maximumProfileDimension)
+            return result;
+        safeImage[key] = *dimension;
+    }
+    result["image"] = std::move(safeImage);
+    return result;
+}
 } // namespace
 Bytes Service::external(int kind, const Bytes &input, const NMWOperation &op) {
     check(op);
@@ -213,6 +244,14 @@ Reply Service::perform(const std::string &route, const Json &q, const Bytes &bod
             fail(NMW_INVALID);
         status["transport"] = "embedded";
         return reply(status);
+    }
+    if (route == "/profile") {
+        if (!body.empty() || !token.empty() || q.size() > 1 || (q.size() == 1 && !q.contains("refresh")))
+            fail(NMW_INVALID);
+        auto refresh = field(q, "refresh", "false");
+        if (refresh != "true" && refresh != "false") fail(NMW_INVALID);
+        return reply(profileResult(exchange(opcode(refresh == "true" ? native_poc::profileRefreshOperation :
+                                                   native_poc::profileReadOperation), op)));
     }
     if (route == "/decrypt") {
         auto sizes = sampleSizes(body);

@@ -141,7 +141,7 @@ int run(const Options &o) {
     server.set_payload_max_length(maxBody);
     server.set_read_timeout(10, 0);
     server.set_write_timeout(30, 0);
-    const std::set<std::string> routes = {"/status", "/m3u8",        "/key",     "/decrypt", "/lyrics",
+    const std::set<std::string> routes = {"/status", "/profile", "/m3u8",        "/key",     "/decrypt", "/lyrics",
                                           "/assets", "/webplayback", "/license", "/artist"};
     auto reject = [&](const httplib::Request &req, httplib::Response &res, int code, const char *message) {
         res.status = 200;

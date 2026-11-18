@@ -63,6 +63,7 @@ Responses preserve the original JSON envelope:
 | Endpoint | Method | Parameters |
 | --- | --- | --- |
 | `/status` | GET | Saved-account status, storefront regions, backend identity. |
+| `/profile` | GET | Active account's Apple Music profile and optional photo metadata. Optional `refresh=true` requests an SDK refresh. |
 | `/artist` | GET | Artist `adamId`, optional two-letter `storefront` (default `us`). Returns catalog metadata and the artist logo. |
 | `/m3u8` | GET | `adamId`. |
 | `/key` | GET | `adamId`, `uri` from the enhanced HLS manifest. |
@@ -79,6 +80,23 @@ curl 'http://127.0.0.1:12341/artist?adamId=1092859&storefront=ph'
 
 `data.artistLogo.url` is a ready-to-use transparent PNG URL when Apple supplies
 a logo. An artist without one still returns their metadata, with `artistLogo: null`.
+
+To read the signed-in account's Apple Music profile:
+
+```sh
+curl 'http://127.0.0.1:12341/profile'
+curl 'http://127.0.0.1:12341/profile?refresh=true'
+```
+
+`/profile` requires a saved account. It reads the SDK cache by default and returns
+`profile_present`, nullable `name` and `handle`, and nullable `image` containing a
+validated Apple image-CDN `url` plus optional `width` and `height`. Missing profiles
+and photos are successful optional results. Image URLs may contain `{w}`, `{h}`,
+`{c}` and `{f}` templates. The response supplies metadata for the client to render.
+Use `refresh=true` explicitly when the cache is empty or stale. Signed-out
+requests return envelope code `401`; an expired saved session needs a fresh
+sign-in before network refresh can succeed. See the native guide for bounds and
+refresh failure behavior.
 
 The native key response supplies a versioned, opaque sample-decryption handle.
 Compatible clients send sample batches to `/decrypt`; a persistent ARM64 worker

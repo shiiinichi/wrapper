@@ -133,6 +133,8 @@ void standaloneTests(Report &r, const fs::path &build, const fs::path &assets) {
             require(envelope(client.Get("/status", h))["code"] == 403, "unexpectedly accepted client");
     });
     r.run("signed-out HTTP requests preserve the authentication envelope", [&] {
+        for (auto path : {"/profile", "/profile?refresh=true", "/profile?refresh=false"})
+            require(envelope(client.Get(path))["code"] == 401, "profile authentication code");
         for (auto route : {"/m3u8", "/lyrics", "/webplayback", "/assets", "/key"}) {
             auto path = std::string(route) + "?adamId=123&uri=skd%3A%2F%2Ftest%2Fkey";
             require(envelope(client.Get(path))["code"] == 401, "missing account became a backend failure");
@@ -157,6 +159,8 @@ void standaloneTests(Report &r, const fs::path &build, const fs::path &assets) {
     r.run("standalone rejects unknown routes, wrong method, duplicate parameters and invalid JSON", [&] {
         require(envelope(client.Get("/unknown"))["code"] == 404, "unknown endpoint");
         require(envelope(client.Post("/key", "", "application/json"))["code"] == 405, "method");
+        require(envelope(client.Post("/profile", "", "application/json"))["code"] == 405, "profile method");
+        require(envelope(client.Get("/profile?account=42"))["code"] == 400, "profile identity parameter");
         require(envelope(client.Get("/m3u8?adamId=1&adamId=2"))["code"] == 400, "duplicate");
         require(envelope(client.Post("/license", "{", "application/json"))["code"] == 400, "bad JSON");
     });

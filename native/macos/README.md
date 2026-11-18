@@ -19,7 +19,7 @@ Use Xcode command-line tools on arm64 macOS. The default command builds and open
 ./script/package_library.sh --output build/NativeMusicWrapperKit
 ```
 
-The desktop starts its own loopback server, checks its instance ID before reporting readiness, and shuts down its child on exit. The server and desktop expose status, sign-in, endpoint checks and response times. Configure a separate account directory through `WRAPPER_PROFILE_DIR` or the desktop’s `--profile` option. The default is `~/Library/Application Support/Native Music Wrapper`. The HTTP timings file contains route names, result codes and durations.
+The desktop starts its own loopback server, checks its instance ID before reporting readiness, and shuts down its child on exit. The server and desktop expose status, sign-in, endpoint checks and response times. Configure account storage through `WRAPPER_PROFILE_DIR` or the desktop’s `--profile` option. The default uses the current user's Application Support location. The HTTP timings file contains route names, result codes and durations.
 
 ## Embedding and playback
 
@@ -30,6 +30,7 @@ Every login, saved profile and playback request uses the original Music 5.0.2, A
 | Route | Result |
 | --- | --- |
 | GET `/status` | Native account presence and storefront regions. Embedded and HTTP clients also receive transport metadata. |
+| GET `/profile` | Active account's cached Apple Music profile; optional `refresh=true` performs a bounded SDK refresh. |
 | GET `/m3u8` | The signed-in SDK asset for `adamId`. An offline-eligible account tries its subscription asset first. A playback-only account tries its playback asset first. Only an empty result tries the other SDK method. The raw response preserves HLS or a direct protected file. |
 | GET `/key` | Native FairPlay key information and a versioned opaque context for the song and key URI. |
 | POST `/decrypt` | Length-prefixed samples decrypted in their original order. The SDK processes each aligned prefix and preserves its clear tail. |
@@ -42,6 +43,71 @@ Every login, saved profile and playback request uses the original Music 5.0.2, A
 The signed-in SDK supplies the manifest. Clients can choose a codec from the playlist and read the sample rate and bit depth of each ALAC rendition from its MP4 audio configuration. Streamed and saved samples use the same native decryption path.
 
 The service bounds metadata, decompressed HTTP data, request admission and sample frames. Redirects stay on the original HTTPS origin. Credentials and signed URLs stay out of service logs. The server listens on loopback and rejects cross-origin browser requests. Signing in or importing discards cached account tokens and decryption handles.
+
+## Apple Music user profile
+
+HTTP `GET /profile` and embedded `nmw_send(runtime, operation, "/profile", "{}", ...)`
+use the same dispatcher and authenticated account gate. The result contains only:
+
+```json
+{"code":0,"msg":"SUCCESS","data":{"profile_present":true,"name":"Fixture Name","handle":"fixture.handle","image":{"url":"https://is1-ssl.mzstatic.com/fixture/{w}x{h}bb.jpg","width":512,"height":512}}}
+```
+
+The embedded success message is `success`, as on the other embedded routes. A
+signed-in account without a cached Apple Music social profile returns code `0`
+with `profile_present: false` and `name`, `handle`, `image` all `null`. A profile
+without a photo has `image: null`; invalid optional metadata also becomes `null`.
+An account name is separate from a social profile name. A signed-out request
+returns the existing code `401` envelope. `/status` confirms a saved account
+record without validating its token with Apple; an expired session needs a fresh
+sign-in before authenticated refresh can succeed. Consumers can keep their system
+avatar when either the profile or image is absent.
+
+The bridge retains the owning guest profile, reads borrowed getter results only
+while that owner is alive, and matches its DSID against the current account
+before exposing metadata. It rechecks the account before returning. No account
+IDs, biographies, social IDs, credentials, tokens or arbitrary dictionary fields
+are included. Profile state is read anew for each request, so account replacement
+cannot reuse an old photo. The SDK's null image setter preserves an old image;
+this route does not use that setter or maintain an additional photo cache.
+
+Name and handle are valid UTF-8 without control characters, capped at 1024 and
+256 bytes. Image metadata is limited to a URL of at most 4096 bytes and optional
+integer dimensions in `1...16384`. URLs must use HTTPS on a subdomain of
+`mzstatic.com`, with no credentials, query, fragment or port other than 443.
+Supported template tokens are `{w}`, `{h}`, `{c}` and `{f}`. The wrapper returns
+metadata without resolving the template or downloading image bytes. The complete worker
+profile reply is capped at 16 KiB, and the dispatcher independently validates and
+projects it onto this schema.
+
+The default route performs no network refresh. Its warm path reads the active
+account and the SDK's keyed profile cache and inspects three image keys; it does
+not scan the music library, request account tokens or fetch artwork. It reuses
+the existing worker, and cold calls pay the normal SDK startup cost. `/status`
+continues to use only its existing status opcode.
+
+For an empty or stale cache, callers can opt into `GET /profile?refresh=true`
+(embedded query `{"refresh":"true"}`). This constructs the SDK's read-only
+`UserProfileRequest` for the active account, requests an 8-second SDK timeout,
+and rereads the account-matched cache on success. Both profile opcodes have a
+12-second worker-exchange wall deadline, including URL-bag bootstrap and cold
+startup; the existing admission queue can add up to 5 seconds. Cancellation or
+deadline expiry closes the worker, and later requests restart through the
+normal generation recovery path. SDK/network rejection remains a backend error
+(HTTP envelope `502`); wall timeout is `504`. Neither is disguised as an absent
+profile. `refresh=false` is equivalent to the default. Other query parameters,
+request bodies and key contexts are rejected.
+
+Deterministic verification covers real SDK fixture accounts, the native getter
+and request-layout ABIs, the C dispatcher and HTTP route, optional/invalid
+metadata, account switching, private-pipe cancellation and refresh wall timeout.
+Fixtures contain no live credentials, and these checks make no live refresh
+request. Separate live-account verification on 2026-11-18 passed for cached reads
+and explicit SDK refresh: the endpoint returned the account-matched profile and
+validated photo metadata, and a header-only request to the resolved photo URL
+returned HTTP `200` with an image content type. The service's account-specific
+no-profile response remains unverified; a cached miss alone does not establish
+that the account has no Apple Music profile.
 
 ## Verified bootstrap milestone
 

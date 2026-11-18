@@ -384,7 +384,9 @@ void Worker::start(const NMWOperation &op, Clock::time_point deadline) {
 Bytes Worker::exchange(const Bytes &request, const NMWOperation &op) {
     if (request.empty() || request.size() > 16 * 1024 * 1024)
         fail(NMW_OVERSIZED);
-    const auto deadline = Clock::now() + std::chrono::seconds(65);
+    const bool profile = request.size() == 4 &&
+        (word(request, 0) == native_poc::profileReadOperation || word(request, 0) == native_poc::profileRefreshOperation);
+    const auto deadline = Clock::now() + std::chrono::seconds(profile ? native_poc::profileWorkerTimeoutSeconds : 65);
     try {
         start(op, deadline);
         Bytes header;

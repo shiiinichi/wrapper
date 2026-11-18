@@ -1,5 +1,6 @@
 #include "native_api.h"
 #include "worker_protocol.h"
+#include "user_profile.h"
 #include "device_asset.h"
 #include "music_client.h"
 #include "auth_input.h"
@@ -361,7 +362,6 @@ bool readFrame(Bytes& result) {
     if (std::fread(result.data(), 1, size, stdin) != size) throw std::runtime_error("truncated worker frame");
     return true;
 }
-struct NoSavedAccount {};
 void writeFrame(WorkerStatus status, const Bytes& result) {
     Bytes header;
     appendWord(header, static_cast<uint32_t>(result.size() + 1));
@@ -470,6 +470,10 @@ void nativeDecryptionWorker(Loader& loader, const std::string& directory, bool e
                 (void)subscriptionSongID(adam);
                 if (!accountPresent(loader, services)) throw NoSavedAccount{};
                 auto json = deviceManifest(loader, services, adam, manifest);
+                response.assign(json.begin(), json.end());
+            } else if (embedded && (operation == profileReadOperation || operation == profileRefreshOperation)) {
+                input.end();
+                auto json = currentUserProfile(loader, services, operation == profileRefreshOperation);
                 response.assign(json.begin(), json.end());
             } else throw std::runtime_error("unknown native sample operation");
             writeFrame(WorkerStatus::success, response);

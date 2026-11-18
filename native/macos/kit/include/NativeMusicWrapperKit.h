@@ -45,6 +45,8 @@ NMWOperation *nmw_operation_create(void);
 void nmw_operation_cancel(NMWOperation *operation);
 int nmw_operation_cancelled(const NMWOperation *operation);
 void nmw_operation_destroy(NMWOperation *operation);
+// /profile reads the active account's cached Apple Music display metadata;
+// query {"refresh":"true"} explicitly requests a bounded SDK refresh.
 NMWReply nmw_send(NMWRuntime *runtime, NMWOperation *operation, const char *route, const char *query_json,
                   const uint8_t *body, size_t body_size, const char *key_context);
 // Reserve the account while a host presents sign-in, or replace it from a
